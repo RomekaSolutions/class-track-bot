@@ -101,6 +101,9 @@ else:
 STUDENTS_FILE = "students.json"
 LOGS_FILE = "logs.json"
 
+# Bangkok timezone used for cancellation cutoff comparisons
+BKK_TZ = pytz.timezone("Asia/Bangkok")
+
 
 # Conversation states for adding a student
 (
@@ -240,6 +243,7 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
     schedule_entries = student.get("class_schedule", []) or []
     now = datetime.now()
     occurrences: List[datetime] = []
+    cancelled = set(student.get("cancelled_dates", []))
     # Compute next occurrence for each schedule entry, then iterate to build list
     for entry in schedule_entries:
         next_time = next_occurrence(entry, now)
@@ -248,11 +252,13 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
     results: List[datetime] = []
     while len(results) < count and occurrences:
         soonest = min(occurrences)
-        results.append(soonest)
         # Move the used occurrence one week ahead for its entry
         idx = occurrences.index(soonest)
         entry = schedule_entries[idx]
         occurrences[idx] = soonest + timedelta(days=7)
+        if soonest.strftime("%Y-%m-%d %H:%M") in cancelled:
+            continue
+        results.append(soonest)
     return results
 
 
@@ -630,10 +636,9 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
 
     Usage: /confirmcancel <student_key>
 
-    When a student requests to cancel a class more than 24h in advance,
-    they are awarded a reschedule credit.  The admin can confirm by
-    invoking this command.  If there is a pending cancellation for the
-    student, the bot marks it as confirmed; otherwise it does nothing.
+    The pending cancellation contains a "type" field ("early" or "late").
+    Early cancels award a reschedule credit; late cancels deduct a class.
+    The cancelled class time is recorded in the student's ``cancelled_dates``.
     """
     args = context.args
     if not args:
@@ -649,22 +654,42 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     if not pending_cancel:
         await update.message.reply_text("There is no pending cancellation to confirm.")
         return
-    # Confirm the cancellation: increase reschedule credit, clear pending
-    student["reschedule_credit"] = student.get("reschedule_credit", 0) + 1
+    class_time_str = pending_cancel.get("class_time")
+    try:
+        datetime.strptime(class_time_str, "%Y-%m-%d %H:%M")
+    except Exception:
+        await update.message.reply_text("Invalid class time format; cancellation not confirmed.")
+        return
+    cancelled_dates = student.setdefault("cancelled_dates", [])
+    if class_time_str not in cancelled_dates:
+        cancelled_dates.append(class_time_str)
+    cancel_type = pending_cancel.get("type", "late")
+    if cancel_type == "early":
+        student["reschedule_credit"] = student.get("reschedule_credit", 0) + 1
+        response = (
+            f"Cancellation confirmed for {student['name']}. Reschedule credit added."
+        )
+        log_status = "cancelled (early)"
+    else:
+        if student.get("classes_remaining", 0) > 0:
+            student["classes_remaining"] -= 1
+        response = (
+            f"Cancellation confirmed for {student['name']}. One class deducted."
+        )
+        log_status = "missed (late cancel)"
     student.pop("pending_cancel", None)
     save_students(students)
-    # Log
     logs = load_logs()
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "status": "cancel_confirmed",
+            "date": datetime.now(BKK_TZ).strftime("%Y-%m-%d"),
+            "status": log_status,
             "note": "",
         }
     )
     save_logs(logs)
-    await update.message.reply_text(f"Cancellation confirmed for {student['name']}.")
+    await update.message.reply_text(response)
 
 
 # -----------------------------------------------------------------------------
@@ -717,8 +742,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     buttons = []
     buttons.append([InlineKeyboardButton("📅 My Classes", callback_data="my_classes")])
     buttons.append([InlineKeyboardButton("❌ Cancel Class", callback_data="cancel_class")])
-    # Show reschedule button only if they have credit
-    if student.get("reschedule_credit", 0) > 0:
+    # Show reschedule button only if user is admin and has credit
+    if student.get("reschedule_credit", 0) > 0 and user.id in ADMIN_IDS:
         buttons.append([InlineKeyboardButton("🔄 Reschedule Class", callback_data="reschedule_class")])
     # Show free class credit info if available
     if student.get("free_class_credit", 0) > 0:
@@ -748,6 +773,9 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "cancel_class":
         await initiate_cancel_class(query, student)
     elif data == "reschedule_class":
+        if query.from_user.id not in ADMIN_IDS:
+            await query.edit_message_text("Rescheduling is currently unavailable.")
+            return
         await initiate_reschedule(query, student, context)
     elif data == "free_credit":
         await show_free_credit(query, student)
@@ -809,44 +837,25 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("Invalid class selected.")
         return
     selected_dt = upcoming[idx]
-    now = datetime.now()
-    delta = selected_dt - now
-    status: str
-    # Determine if it's a late cancel (<24h) or reschedule credit
-    if delta > timedelta(hours=24):
-        # Early cancel: award pending cancellation that admin must confirm
-        student["pending_cancel"] = {
-            "class_time": selected_dt.strftime("%Y-%m-%d %H:%M"),
-            "requested_at": now.strftime("%Y-%m-%d %H:%M"),
-        }
-        status = "requested"
+    now_bkk = datetime.now(BKK_TZ)
+    class_day_start = BKK_TZ.localize(datetime.combine(selected_dt.date(), time.min))
+    cancel_type = "early" if now_bkk < class_day_start else "late"
+    student["pending_cancel"] = {
+        "class_time": selected_dt.strftime("%Y-%m-%d %H:%M"),
+        "requested_at": now_bkk.strftime("%Y-%m-%d %H:%M"),
+        "type": cancel_type,
+    }
+    save_students(students)
+    if cancel_type == "early":
         message = (
-            "Cancellation request sent to your teacher. You will receive a reschedule "
-            "credit once confirmed."
+            "Cancellation request sent to your teacher. Cancel before the day of class "
+            "(Bangkok time) = no deduction. Cancelling on the day = one class deducted."
         )
     else:
-        # Late cancel: class missed
-        # Deduct a class
-        if student.get("classes_remaining", 0) > 0:
-            student["classes_remaining"] -= 1
-        # Log missed
-        logs = load_logs()
-        logs.append(
-            {
-                "student": user_id,
-                "date": now.strftime("%Y-%m-%d"),
-                "status": "missed (late cancel)",
-                "note": "",
-            }
-        )
-        save_logs(logs)
-        status = "missed"
         message = (
-            "Class cancelled less than 24h before start and has been marked as missed. "
-            "This class will be deducted from your plan."
+            "Cancellation request sent to your teacher. Cancelling on the day = one class "
+            "deducted."
         )
-    save_students(students)
-    # Notify user
     await query.edit_message_text(message)
 
 
