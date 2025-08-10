@@ -58,8 +58,13 @@ from telegram.ext import (
     ConversationHandler,
     MessageHandler,
     CallbackQueryHandler,
+    JobQueue,
     filters,
 )
+
+# Additional imports for timezone handling and custom job queue
+import pytz
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 
 # -----------------------------------------------------------------------------
@@ -74,7 +79,22 @@ from telegram.ext import (
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN_HERE")
 
 # Replace with your own Telegram numerical user IDs
-ADMIN_IDS = {123456789}
+#
+# This value can also be overridden via the ``ADMIN_IDS`` environment variable. If
+# present, it should be a comma‑separated list of integers. For example:
+#   export ADMIN_IDS="123456789,987654321"
+# will result in ``ADMIN_IDS`` being set to ``{123456789, 987654321}``.
+admin_env = os.environ.get("ADMIN_IDS")
+if admin_env:
+    try:
+        ADMIN_IDS = {int(item.strip()) for item in admin_env.split(",") if item.strip()}
+    except ValueError:
+        logging.warning(
+            "Invalid ADMIN_IDS environment variable; falling back to default admin list."
+        )
+        ADMIN_IDS = {123456789}
+else:
+    ADMIN_IDS = {123456789}
 
 
 # Paths to the JSON database files.  Adjust if you wish to store them elsewhere.
@@ -1020,8 +1040,35 @@ def main() -> None:
     if TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
         logging.warning("Please set the TELEGRAM_BOT_TOKEN environment variable or edit the TOKEN constant.")
 
-    application: Application = ApplicationBuilder().token(TOKEN).build()
+    # ----------------------------------------------------------------------
+    # Configure JobQueue with a timezone-aware scheduler
+    #
+    # APScheduler in python-telegram-bot requires a pytz timezone object. Without
+    # specifying a timezone, the default scheduler will raise a TypeError
+    # complaining that only pytz timezones are supported. We create an
+    # AsyncIOScheduler with our desired timezone (Bangkok by default) and
+    # provide it to a JobQueue instance.  The JobQueue is then passed to
+    # ApplicationBuilder so that the application uses our custom scheduler.
+    #
+    # If you deploy this bot in a different locale, replace "Asia/Bangkok" with
+    # your own timezone, e.g. "UTC" or "America/New_York".  See pytz
+    # documentation for valid identifiers.
+    tz = pytz.timezone("Asia/Bangkok")
+    scheduler = AsyncIOScheduler(timezone=tz)
+    job_queue = JobQueue()
+    application: Application = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .job_queue(job_queue)
+        .build()
+    )
+
     # Conversation handler for adding student
+    async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+        """Fallback handler to gracefully cancel the add‑student conversation."""
+        await update.message.reply_text("Operation cancelled.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("addstudent", add_student_command)],
         states={
@@ -1033,7 +1080,7 @@ def main() -> None:
             ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
             ADD_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_color)],
         },
-        fallbacks=[CommandHandler("cancel", lambda update, context: update.message.reply_text("Cancelled."))],
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
         allow_reentry=True,
     )
     application.add_handler(conv_handler)
@@ -1050,12 +1097,17 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(student_button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # Job queue for reminders and monthly export
-    # Renewal reminders at 09:00 every day
-    application.job_queue.run_daily(renewal_reminder_job, time=time(hour=9, minute=0, second=0))
-    # Low class warnings at 10:00 every day
-    application.job_queue.run_daily(low_class_warning_job, time=time(hour=10, minute=0, second=0))
-    # Monthly export on the last day at 23:00
-    application.job_queue.run_monthly(monthly_export_job, day=0, time=time(hour=23, minute=0, second=0))
+    # Renewal reminders at 09:00 every day (timezone-aware)
+    application.job_queue.run_daily(renewal_reminder_job, time=time(hour=9, minute=0, tzinfo=tz))
+    # Low class warnings at 10:00 every day (timezone-aware)
+    application.job_queue.run_daily(low_class_warning_job, time=time(hour=10, minute=0, tzinfo=tz))
+    # Monthly export on the last day at 23:00 (timezone-aware)
+    # Use 'when' instead of 'time' and day=-1 to signify the last day of the month
+    application.job_queue.run_monthly(
+        monthly_export_job,
+        when=time(hour=23, minute=0, tzinfo=tz),
+        day=-1,
+    )
     # Start the bot
     application.run_polling()
 
