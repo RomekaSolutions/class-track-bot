@@ -101,9 +101,6 @@ else:
 STUDENTS_FILE = "students.json"
 LOGS_FILE = "logs.json"
 
-# Bangkok timezone used for cancellation cutoff comparisons
-BKK_TZ = pytz.timezone("Asia/Bangkok")
-
 # Default values for new student fields
 DEFAULT_CUTOFF_HOURS = 24
 DEFAULT_CYCLE_WEEKS = 4
@@ -114,6 +111,15 @@ DEFAULT_STUDENT_TZ = "Asia/Bangkok"
 def is_valid_timezone(tz: str) -> bool:
     """Return True if ``tz`` is a known IANA timezone string."""
     return tz in pytz.all_timezones
+
+
+def student_timezone(student: Dict[str, Any]) -> pytz.timezone:
+    """Return a pytz timezone for the given student record."""
+    tz_name = student.get("student_timezone", DEFAULT_STUDENT_TZ)
+    try:
+        return pytz.timezone(tz_name)
+    except Exception:
+        return pytz.timezone(DEFAULT_STUDENT_TZ)
 
 
 def normalize_students(students: Dict[str, Any]) -> bool:
@@ -209,19 +215,37 @@ def save_logs(logs: List[Dict[str, Any]]) -> None:
         json.dump(logs, f, indent=2, ensure_ascii=False, sort_keys=True)
 
 
-def parse_schedule(schedule_str: str) -> List[str]:
-    """Parse a comma‑separated list of schedule entries into a list.
+def parse_schedule(
+    schedule_str: str,
+    *,
+    start_date: Optional[date] = None,
+    cycle_weeks: int = DEFAULT_CYCLE_WEEKS,
+    tz_name: str = DEFAULT_STUDENT_TZ,
+) -> List[str]:
+    """Generate concrete class dates for a repeating schedule.
 
-    Users can input schedules like "Monday 17:00, Thursday 17:00".
-    We store the stripped entries as they are; a later function will
-    compute concrete datetimes from these patterns.
+    ``schedule_str`` is a comma separated string such as
+    "Monday 17:00, Thursday 17:00". ``start_date`` marks the beginning of
+    the cycle.  For each entry we compute all occurrences within
+    ``cycle_weeks`` weeks and return a list of ``YYYY-MM-DD HH:MM`` strings
+    in chronological order.  The dates are interpreted in ``tz_name``.
     """
-    entries = []
-    for item in schedule_str.split(","):
-        entry = item.strip()
-        if entry:
-            entries.append(entry)
-    return entries
+    if start_date is None:
+        start_date = date.today()
+    tz = pytz.timezone(tz_name)
+    entries = [item.strip() for item in schedule_str.split(",") if item.strip()]
+    if not entries:
+        return []
+    start_dt = tz.localize(datetime.combine(start_date, time.min))
+    end_dt = start_dt + timedelta(weeks=cycle_weeks)
+    results: List[str] = []
+    for entry in entries:
+        next_dt = next_occurrence(entry, now=start_dt)
+        while next_dt < end_dt:
+            results.append(next_dt.strftime("%Y-%m-%d %H:%M"))
+            next_dt += timedelta(weeks=1)
+    results.sort()
+    return results
 
 
 def parse_renewal_date(date_str: str) -> Optional[str]:
@@ -276,36 +300,29 @@ def next_occurrence(day_time_str: str, now: Optional[datetime] = None) -> dateti
 
 
 def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[datetime]:
-    """Given a student record, return the next `count` class datetimes.
+    """Return upcoming class datetimes in the student's timezone.
 
-    This looks at the student's ``class_schedule`` entries (e.g.,
-    ["Monday 17:00", "Thursday 17:00"]) and computes the next
-    occurrences.  Results are sorted chronologically.  If the schedule
-    list is empty, returns an empty list.
-
-    The returned datetimes are naive (no timezone) and represent local
-    time; adjust accordingly if you require timezone awareness.
+    ``student['class_dates']`` stores concrete class datetimes as
+    ``YYYY-MM-DD HH:MM`` strings in the student's local timezone.  This
+    function converts them to aware ``datetime`` objects, filters out past
+    or cancelled classes and returns the next ``count`` items.
     """
-    schedule_entries = student.get("class_schedule", []) or []
-    now = datetime.now()
-    occurrences: List[datetime] = []
+    tz = student_timezone(student)
+    now = datetime.now(tz)
     cancelled = set(student.get("cancelled_dates", []))
-    # Compute next occurrence for each schedule entry, then iterate to build list
-    for entry in schedule_entries:
-        next_time = next_occurrence(entry, now)
-        occurrences.append(next_time)
-    # For additional classes (beyond one per entry) we step by weeks
     results: List[datetime] = []
-    while len(results) < count and occurrences:
-        soonest = min(occurrences)
-        # Move the used occurrence one week ahead for its entry
-        idx = occurrences.index(soonest)
-        entry = schedule_entries[idx]
-        occurrences[idx] = soonest + timedelta(days=7)
-        if soonest.strftime("%Y-%m-%d %H:%M") in cancelled:
+    for item in student.get("class_dates", []):
+        try:
+            dt = tz.localize(datetime.strptime(item, "%Y-%m-%d %H:%M"))
+        except Exception:
             continue
-        results.append(soonest)
-    return results
+        if dt <= now:
+            continue
+        if item in cancelled:
+            continue
+        results.append(dt)
+    results.sort()
+    return results[:count]
 
 
 def admin_only(func):
@@ -384,16 +401,11 @@ async def add_classes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 async def add_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     schedule_input = update.message.text.strip()
-    if schedule_input:
-        schedule = parse_schedule(schedule_input)
-    else:
-        schedule = []
-    context.user_data["class_schedule"] = schedule
+    context.user_data["schedule_pattern"] = schedule_input
     await update.message.reply_text(
-        "Hours before class when cancellations are 'no deduction' (e.g., 24):"
+        "Hours before class when cancellations are 'no deduction' (e.g., 24):",
     )
     return ADD_CUTOFF
-
 
 async def add_cutoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
@@ -490,6 +502,17 @@ async def add_color(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if key in students:
         await update.message.reply_text("A student with this identifier already exists. Aborting.")
         return ConversationHandler.END
+    schedule_pattern = context.user_data.get("schedule_pattern", "")
+    tz_name = context.user_data.get("student_timezone", DEFAULT_STUDENT_TZ)
+    cycle_weeks = context.user_data.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
+    start_date = datetime.now(pytz.timezone(tz_name)).date()
+    class_dates = parse_schedule(
+        schedule_pattern,
+        start_date=start_date,
+        cycle_weeks=cycle_weeks,
+        tz_name=tz_name,
+    )
+
     students[key] = {
         "name": context.user_data.get("name"),
         "telegram_id": telegram_id,
@@ -497,11 +520,12 @@ async def add_color(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "classes_remaining": context.user_data.get("classes_remaining"),
         "plan_price": context.user_data.get("plan_price"),
         "renewal_date": context.user_data.get("renewal_date"),
-        "class_schedule": context.user_data.get("class_schedule"),
+        "class_dates": class_dates,
+        "schedule_pattern": schedule_pattern,
         "cutoff_hours": context.user_data.get("cutoff_hours"),
-        "cycle_weeks": context.user_data.get("cycle_weeks"),
+        "cycle_weeks": cycle_weeks,
         "class_duration_hours": context.user_data.get("class_duration_hours"),
-        "student_timezone": context.user_data.get("student_timezone"),
+        "student_timezone": tz_name,
         "paused": False,
         "free_class_credit": 0,
         "reschedule_credit": 0,
@@ -547,7 +571,7 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now().strftime("%Y-%m-%d"),
+            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
             "status": "completed",
             "note": note,
         }
@@ -583,7 +607,7 @@ async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYP
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now().strftime("%Y-%m-%d"),
+            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
             "status": "cancelled_by_admin",
             "note": "",
         }
@@ -616,7 +640,7 @@ async def award_free_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now().strftime("%Y-%m-%d"),
+            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
             "status": "free_credit_awarded",
             "note": "",
         }
@@ -659,9 +683,9 @@ def generate_dashboard_summary() -> str:
     """
     students = load_students()
     logs = load_logs()
-    now = datetime.now()
-    today_date = now.date()
-    month_start = date(now.year, now.month, 1)
+    now_admin = datetime.now()
+    today_admin = now_admin.date()
+    month_start = date(now_admin.year, now_admin.month, 1)
 
     today_classes: List[str] = []
     low_balances: List[str] = []
@@ -694,10 +718,12 @@ def generate_dashboard_summary() -> str:
         if student.get("paused"):
             paused_students.append(student["name"])
             continue
+        tz = student_timezone(student)
+        today_date = datetime.now(tz).date()
         # Check upcoming classes for today
         for dt in get_upcoming_classes(student, count=3):
-            if dt.date() == today_date:
-                today_classes.append(f"{student['name']} at {dt.strftime('%H:%M')}")
+            if dt.astimezone(tz).date() == today_date:
+                today_classes.append(f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}")
                 break
         # Low class warnings
         if student.get("classes_remaining", 0) <= 2:
@@ -715,7 +741,7 @@ def generate_dashboard_summary() -> str:
 
     summary_lines = []
     summary_lines.append("📊 Dashboard Summary\n")
-    summary_lines.append(f"Today's classes ({today_date.isoformat()}):")
+    summary_lines.append(f"Today's classes ({today_admin.isoformat()}):")
     summary_lines.extend([f"  - {item}" for item in (today_classes or ["None"])])
     summary_lines.append("")
     summary_lines.append("Students with low class balance:")
@@ -800,7 +826,7 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(BKK_TZ).strftime("%Y-%m-%d"),
+            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
             "status": log_status,
             "note": "",
         }
@@ -939,24 +965,23 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("Invalid class selected.")
         return
     selected_dt = upcoming[idx]
-    now_bkk = datetime.now(BKK_TZ)
-    class_day_start = BKK_TZ.localize(datetime.combine(selected_dt.date(), time.min))
-    cancel_type = "early" if now_bkk < class_day_start else "late"
+    tz = student_timezone(student)
+    now_tz = datetime.now(tz)
+    cutoff = student.get("cutoff_hours", DEFAULT_CUTOFF_HOURS)
+    cancel_type = "early" if now_tz <= selected_dt - timedelta(hours=cutoff) else "late"
     student["pending_cancel"] = {
         "class_time": selected_dt.strftime("%Y-%m-%d %H:%M"),
-        "requested_at": now_bkk.strftime("%Y-%m-%d %H:%M"),
+        "requested_at": now_tz.strftime("%Y-%m-%d %H:%M"),
         "type": cancel_type,
     }
     save_students(students)
     if cancel_type == "early":
         message = (
-            "Cancellation request sent to your teacher. Cancel before the day of class "
-            "(Bangkok time) = no deduction. Cancelling on the day = one class deducted."
+            f"Cancellation request sent to your teacher. Cancel at least {cutoff} hours before class = no deduction."
         )
     else:
         message = (
-            "Cancellation request sent to your teacher. Cancelling on the day = one class "
-            "deducted."
+            f"Cancellation request sent to your teacher. Cancelling within {cutoff} hours of class = one class deducted."
         )
     await query.edit_message_text(message)
 
@@ -986,10 +1011,11 @@ async def renewal_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send renewal reminders to students who are approaching their renewal date."""
     bot = context.bot
     students = load_students()
-    today = datetime.now().date()
     for key, student in students.items():
         if student.get("paused"):
             continue
+        tz = student_timezone(student)
+        today = datetime.now(tz).date()
         try:
             renewal_date = datetime.strptime(student["renewal_date"], "%Y-%m-%d").date()
         except Exception:
@@ -1089,7 +1115,7 @@ async def confirm_reschedule_command(update: Update, context: ContextTypes.DEFAU
     logs = load_logs()
     logs.append({
         "student": student_key,
-        "date": datetime.now().strftime("%Y-%m-%d"),
+        "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
         "status": f"rescheduled_to_{proposed_time}",
         "note": "approved_by_admin",
     })
