@@ -118,8 +118,7 @@ BKK_TZ = pytz.timezone("Asia/Bangkok")
     ADD_TIMEZONE,
     ADD_RENEWAL,
     ADD_COLOR,
-    CONFIRM_ADD,
-) = range(12)
+) = range(11)
 
 # States for rescheduling classes
 (RESCHEDULE_SELECT, RESCHEDULE_TIME, RESCHEDULE_CONFIRM) = range(20, 23)
@@ -1193,19 +1192,19 @@ def main() -> None:
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_HANDLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_handle)],
-        ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_price)],
-        ADD_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_classes)],
-        ADD_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_schedule)],
-        ADD_CUTOFF: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_cutoff)],
-        ADD_WEEKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_weeks)],
-        ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_duration)],
-        ADD_TIMEZONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_timezone)],
-        ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
-        ADD_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_color)],
-    },
-    fallbacks=[CommandHandler("cancel", cancel_conversation)],
-    allow_reentry=True,
-)
+            ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_price)],
+            ADD_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_classes)],
+            ADD_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_schedule)],
+            ADD_CUTOFF: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_cutoff)],
+            ADD_WEEKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_weeks)],
+            ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_duration)],
+            ADD_TIMEZONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_timezone)],
+            ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
+            ADD_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_color)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+        allow_reentry=True,
+    )
     application.add_handler(conv_handler)
     # Admin commands
     application.add_handler(CommandHandler("logclass", log_class_command))
