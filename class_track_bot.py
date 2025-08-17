@@ -839,6 +839,56 @@ async def award_free_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 @admin_only
+async def renew_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Renew a student's plan by adding classes and setting a new renewal date.
+
+    Usage: /renewstudent <student_key> <num_classes> <YYYY-MM-DD>
+    """
+    args = context.args
+    if len(args) != 3:
+        await update.message.reply_text(
+            "Usage: /renewstudent <student_key> <num_classes> <YYYY-MM-DD>"
+        )
+        return
+    student_key, classes_str, date_str = args
+    try:
+        num_classes = int(classes_str)
+        if num_classes <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Number of classes must be a positive integer.")
+        return
+    renewal = parse_renewal_date(date_str)
+    if renewal is None:
+        await update.message.reply_text("Invalid date format. Use YYYY-MM-DD.")
+        return
+    students = load_students()
+    if student_key not in students:
+        await update.message.reply_text(f"Student '{student_key}' not found.")
+        return
+    student = students[student_key]
+    student["classes_remaining"] = student.get("classes_remaining", 0) + num_classes
+    student["renewal_date"] = renewal
+    ensure_future_class_dates(student)
+    save_students(students)
+    schedule_student_reminders(context.application, student_key, student)
+    logs = load_logs()
+    logs.append(
+        {
+            "student": student_key,
+            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
+            "status": "renewed",
+            "note": f"{num_classes} classes, new renewal {renewal}",
+        }
+    )
+    save_logs(logs)
+    await update.message.reply_text(
+        f"Renewed {student['name']}: added {num_classes} classes, renewal date set to {renewal}. "
+        f"Balance: {student['classes_remaining']}"
+    )
+
+
+@admin_only
 async def pause_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Pause or unpause a student.
 
@@ -902,21 +952,9 @@ def generate_dashboard_summary() -> str:
             rescheduled += 1
 
     for key, student in students.items():
-        # Skip paused students for most checks
-        if student.get("paused"):
-            paused_students.append(student["name"])
-            continue
         tz = student_timezone(student)
         today_date = datetime.now(tz).date()
-        # Check upcoming classes for today
-        for dt in get_upcoming_classes(student, count=3):
-            if dt.astimezone(tz).date() == today_date:
-                today_classes.append(f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}")
-                break
-        # Low class warnings
-        if student.get("classes_remaining", 0) <= 2:
-            low_balances.append(f"{student['name']} ({student['classes_remaining']} left)")
-        # Upcoming and overdue renewals
+        # Upcoming and overdue renewals (include paused students)
         try:
             renewal_date = datetime.strptime(student["renewal_date"], "%Y-%m-%d").date()
             days_until = (renewal_date - today_date).days
@@ -926,6 +964,18 @@ def generate_dashboard_summary() -> str:
                 overdue_renewals.append(f"{student['name']} ({student['renewal_date']})")
         except Exception:
             pass
+        # Skip further checks for paused students
+        if student.get("paused"):
+            paused_students.append(student["name"])
+            continue
+        # Check upcoming classes for today
+        for dt in get_upcoming_classes(student, count=3):
+            if dt.astimezone(tz).date() == today_date:
+                today_classes.append(f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}")
+                break
+        # Low class warnings
+        if student.get("classes_remaining", 0) <= 2:
+            low_balances.append(f"{student['name']} ({student['classes_remaining']} left)")
         # Free credits
         if student.get("free_class_credit", 0) > 0:
             free_credits.append(f"{student['name']} ({student['free_class_credit']})")
@@ -1582,6 +1632,7 @@ def main() -> None:
     application.add_handler(CommandHandler("logclass", log_class_command))
     application.add_handler(CommandHandler("cancelclass", cancel_class_command))
     application.add_handler(CommandHandler("awardfree", award_free_command))
+    application.add_handler(CommandHandler("renewstudent", renew_student_command))
     application.add_handler(CommandHandler("pause", pause_student_command))
     application.add_handler(CommandHandler("dashboard", dashboard_command))
     application.add_handler(CommandHandler("downloadmonth", download_month_command))
