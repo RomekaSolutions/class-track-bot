@@ -1038,6 +1038,48 @@ async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 # -----------------------------------------------------------------------------
 # Setup and main entry point
 # -----------------------------------------------------------------------------
+async def confirm_reschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("Sorry, you are not authorized to perform this command.")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /confirmreschedule <student_key>")
+        return
+
+    student_key = args[0]
+    students = load_students()
+    if student_key not in students:
+        await update.message.reply_text(f"Student '{student_key}' not found.")
+        return
+
+    student = students[student_key]
+    pending = student.get("pending_reschedule")
+    if not pending:
+        await update.message.reply_text("There is no pending reschedule to confirm.")
+        return
+
+    proposed_time = pending.get("proposed_time")
+
+    # log as rescheduled so the dashboard increments
+    logs = load_logs()
+    logs.append({
+        "student": student_key,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "status": f"rescheduled_to_{proposed_time}",
+        "note": "approved_by_admin",
+    })
+    save_logs(logs)
+
+    # clear pending and persist
+    student.pop("pending_reschedule", None)
+    save_students(students)
+
+    await update.message.reply_text(
+        f"Reschedule confirmed for {student.get('name','?')} → {proposed_time}."
+    )
 
 def main() -> None:
     """Create the bot application and register handlers."""
@@ -1100,6 +1142,8 @@ def main() -> None:
     application.add_handler(CommandHandler("pause", pause_student_command))
     application.add_handler(CommandHandler("dashboard", dashboard_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
+    application.add_handler(CommandHandler("confirmreschedule", confirm_reschedule_command))
+
     # Student handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:", block=False))
