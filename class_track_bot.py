@@ -160,6 +160,10 @@ def normalize_students(students: Dict[str, Any]) -> bool:
         if not is_valid_timezone(tz if tz else ""):
             student["student_timezone"] = DEFAULT_STUDENT_TZ
             changed = True
+        # Remove legacy pending reschedule field if present
+        if "pending_reschedule" in student:
+            student.pop("pending_reschedule", None)
+            changed = True
         if changed:
             logging.info(
                 "Applied default fields for legacy student %s",
@@ -1014,6 +1018,67 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text(response)
 
 
+@admin_only
+async def reschedule_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reschedule a specific class for a student.
+
+    Usage: /reschedulestudent <student_key> <old_datetime> <new_datetime>
+
+    Datetimes should be in ISO 8601 format and match entries in the
+    student's ``class_dates`` list.
+    """
+
+    args = context.args
+    if len(args) != 3:
+        await update.message.reply_text(
+            "Usage: /reschedulestudent <student_key> <old_datetime> <new_datetime>"
+        )
+        return
+
+    student_key, old_str, new_str = args
+    students = load_students()
+    if student_key not in students:
+        await update.message.reply_text(f"Student '{student_key}' not found.")
+        return
+
+    student = students[student_key]
+    try:
+        datetime.fromisoformat(old_str)
+        datetime.fromisoformat(new_str)
+    except ValueError:
+        await update.message.reply_text("Datetimes must be in ISO 8601 format.")
+        return
+
+    class_dates = student.get("class_dates", [])
+    if old_str not in class_dates:
+        await update.message.reply_text("Old datetime not found in student's schedule.")
+        return
+
+    class_dates.remove(old_str)
+    if new_str not in class_dates:
+        class_dates.append(new_str)
+    class_dates.sort()
+    student["class_dates"] = class_dates
+    ensure_future_class_dates(student)
+    save_students(students)
+    schedule_student_reminders(context.application, student_key, student)
+
+    logs = load_logs()
+    logs.append(
+        {
+            "student": student_key,
+            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
+            "status": f"rescheduled:{old_str}->{new_str}",
+            "note": "admin_reschedule",
+        }
+    )
+    save_logs(logs)
+
+    await update.message.reply_text(
+        f"Rescheduled {student.get('name', student_key)} from {old_str} to {new_str}."
+    )
+
+
 # -----------------------------------------------------------------------------
 # Student interface handlers
 # -----------------------------------------------------------------------------
@@ -1269,49 +1334,6 @@ async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 # -----------------------------------------------------------------------------
 # Setup and main entry point
 # -----------------------------------------------------------------------------
-async def confirm_reschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("Sorry, you are not authorized to perform this command.")
-        return
-
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /confirmreschedule <student_key>")
-        return
-
-    student_key = args[0]
-    students = load_students()
-    if student_key not in students:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
-        return
-
-    student = students[student_key]
-    pending = student.get("pending_reschedule")
-    if not pending:
-        await update.message.reply_text("There is no pending reschedule to confirm.")
-        return
-
-    proposed_time = pending.get("proposed_time")
-
-    # log as rescheduled so the dashboard increments
-    logs = load_logs()
-    logs.append({
-        "student": student_key,
-        "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
-        "status": f"rescheduled_to_{proposed_time}",
-        "note": "approved_by_admin",
-    })
-    save_logs(logs)
-
-    # clear pending and persist
-    student.pop("pending_reschedule", None)
-    save_students(students)
-
-    await update.message.reply_text(
-        f"Reschedule confirmed for {student.get('name','?')} → {proposed_time}."
-    )
-
 def main() -> None:
     """Create the bot application and register handlers."""
     # Configure logging
@@ -1377,7 +1399,7 @@ def main() -> None:
     application.add_handler(CommandHandler("pause", pause_student_command))
     application.add_handler(CommandHandler("dashboard", dashboard_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
-    application.add_handler(CommandHandler("confirmreschedule", confirm_reschedule_command))
+    application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
 
     # Student handlers
     application.add_handler(CommandHandler("start", start_command))
