@@ -112,10 +112,11 @@ BKK_TZ = pytz.timezone("Asia/Bangkok")
     ADD_PRICE,
     ADD_CLASSES,
     ADD_SCHEDULE,
+    ADD_CUTOFF,
     ADD_RENEWAL,
     ADD_COLOR,
     CONFIRM_ADD,
-) = range(8)
+) = range(9)
 
 # States for rescheduling classes
 (RESCHEDULE_SELECT, RESCHEDULE_TIME, RESCHEDULE_CONFIRM) = range(20, 23)
@@ -129,14 +130,25 @@ def load_students() -> Dict[str, Any]:
         try:
             data = json.load(f)
             if isinstance(data, dict):
-                return data
-            # If stored as list in earlier versions, convert to dict keyed by telegram_id
-            if isinstance(data, list):
-                return {str(item["telegram_id"]): item for item in data}
+                students = data
+            elif isinstance(data, list):
+                students = {str(item["telegram_id"]): item for item in data}
+            else:
+                students = {}
         except json.JSONDecodeError:
             logging.error("Failed to parse students.json; starting with empty database.")
-            return {}
-    return {}
+            students = {}
+
+    # Ensure backward compatibility for new fields
+    for student in students.values():
+        student.setdefault("cutoff_hours", 24)
+        student.setdefault("cycle_weeks", 4)
+        student.setdefault("class_duration_hours", 1)
+        tz = student.get("student_timezone", "Asia/Bangkok")
+        if tz not in pytz.all_timezones:
+            tz = "Asia/Bangkok"
+        student["student_timezone"] = tz
+    return students
 
 
 def save_students(students: Dict[str, Any]) -> None:
@@ -344,6 +356,25 @@ async def add_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         schedule = []
     context.user_data["class_schedule"] = schedule
     await update.message.reply_text(
+        "Enter cutoff hours before class for cancellation (e.g., 24):",
+    )
+    return ADD_CUTOFF
+
+
+async def add_cutoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Store cancellation cutoff hours and prompt for renewal date."""
+    cutoff_str = update.message.text.strip()
+    try:
+        cutoff = int(cutoff_str)
+        if cutoff < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Please enter cutoff hours as a positive integer (e.g., 24):"
+        )
+        return ADD_CUTOFF
+    context.user_data["cutoff_hours"] = cutoff
+    await update.message.reply_text(
         "Enter the renewal date (YYYY-MM-DD). This is when the student is expected to renew payment:",
     )
     return ADD_RENEWAL
@@ -384,6 +415,10 @@ async def add_color(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "plan_price": context.user_data.get("plan_price"),
         "renewal_date": context.user_data.get("renewal_date"),
         "class_schedule": context.user_data.get("class_schedule"),
+        "cutoff_hours": context.user_data.get("cutoff_hours", 24),
+        "cycle_weeks": context.user_data.get("cycle_weeks", 4),
+        "class_duration_hours": context.user_data.get("class_duration_hours", 1),
+        "student_timezone": context.user_data.get("student_timezone", "Asia/Bangkok"),
         "paused": False,
         "silent_mode": False,
         "free_class_credit": 0,
@@ -1128,6 +1163,7 @@ def main() -> None:
             ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_price)],
             ADD_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_classes)],
             ADD_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_schedule)],
+            ADD_CUTOFF: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_cutoff)],
             ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
             ADD_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_color)],
         },
