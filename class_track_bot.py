@@ -1149,13 +1149,13 @@ async def reschedule_student_command(update: Update, context: ContextTypes.DEFAU
 async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Remove a student record and cancel scheduled reminders.
 
-    Usage: /removestudent <student_key> [reason]
+    Usage: /removestudent <student_key> confirm [reason]
     Run once to prompt confirmation, then repeat with ``confirm`` to finalize.
     """
     args = context.args
     if not args:
         await update.message.reply_text(
-            "Usage: /removestudent <student_key> [reason]"
+            "Usage: /removestudent <student_key> confirm [reason]"
         )
         return
 
@@ -1176,12 +1176,14 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    student = students.pop(student_key)
+    student = students.get(student_key)
+    aliases = [k for k, v in students.items() if v is student]
+    for alias in aliases:
+        students.pop(alias, None)
     save_students(students)
 
-    prefix = f"class_reminder:{student_key}:"
     for job in context.application.job_queue.jobs():
-        if job.name and job.name.startswith(prefix):
+        if job.name and any(job.name.startswith(f"class_reminder:{alias}:") for alias in aliases):
             job.schedule_removal()
 
     logs = load_logs()
