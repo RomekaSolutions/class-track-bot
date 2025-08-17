@@ -1299,6 +1299,25 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
         )
     await query.edit_message_text(message)
 
+    # Notify all admins about the cancellation request
+    student_name = student.get("name", user_id)
+    class_time_str = selected_dt.strftime("%a %d %b %H:%M")
+    cancel_type_readable = "Early" if cancel_type == "early" else "Late"
+    admin_message = (
+        f"🚨 Cancellation Request: {student_name} wants to cancel {class_time_str}. "
+        f"Type: {cancel_type_readable}. Use /confirmcancel {user_id}"
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=admin_message)
+        except Exception as e:
+            logging.warning(
+                "Failed to notify admin %s about cancellation from %s: %s",
+                admin_id,
+                student_name,
+                e,
+            )
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Catch all handler for plain text messages from students."""
