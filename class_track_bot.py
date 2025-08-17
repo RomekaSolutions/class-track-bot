@@ -1177,13 +1177,26 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     student = students.get(student_key)
-    aliases = [k for k, v in students.items() if v is student]
-    for alias in aliases:
-        students.pop(alias, None)
+    telegram_id = str(student.get("telegram_id", ""))
+    handle = (student.get("telegram_handle") or "").lstrip("@").lower()
+
+    keys_to_delete = {student_key}
+    for k, v in students.items():
+        if k == student_key:
+            continue
+        if telegram_id and str(v.get("telegram_id", "")) == telegram_id:
+            keys_to_delete.add(k)
+        v_handle = (v.get("telegram_handle") or "").lstrip("@").lower()
+        if handle and v_handle and v_handle == handle:
+            keys_to_delete.add(k)
+
+    for key in keys_to_delete:
+        students.pop(key, None)
     save_students(students)
 
     for job in context.application.job_queue.jobs():
-        if job.name and any(job.name.startswith(f"class_reminder:{alias}:") for alias in aliases):
+        name = job.name or ""
+        if any(name.startswith(f"class_reminder:{k}:") for k in keys_to_delete):
             job.schedule_removal()
 
     logs = load_logs()
