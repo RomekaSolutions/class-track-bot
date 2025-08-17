@@ -64,6 +64,7 @@ from telegram.ext import (
 
 # Additional imports for timezone handling and custom job queue
 import pytz
+from pytz import AmbiguousTimeError, NonExistentTimeError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 
@@ -106,6 +107,8 @@ DEFAULT_CUTOFF_HOURS = 24
 DEFAULT_CYCLE_WEEKS = 4
 DEFAULT_DURATION_HOURS = 1.0
 DEFAULT_STUDENT_TZ = "Asia/Bangkok"
+# Offset before class time to send reminder
+DEFAULT_REMINDER_OFFSET = timedelta(hours=1)
 
 
 def is_valid_timezone(tz: str) -> bool:
@@ -120,6 +123,19 @@ def student_timezone(student: Dict[str, Any]) -> pytz.timezone:
         return pytz.timezone(tz_name)
     except Exception:
         return pytz.timezone(DEFAULT_STUDENT_TZ)
+
+
+def safe_localize(tz: pytz.timezone, naive_dt: datetime) -> datetime:
+    """Localize ``naive_dt`` handling DST edge cases."""
+    try:
+        return tz.localize(naive_dt, is_dst=None)
+    except AmbiguousTimeError as e:
+        logging.warning("Ambiguous time %s in %s: %s", naive_dt, tz, e)
+        return tz.localize(naive_dt, is_dst=True)
+    except NonExistentTimeError as e:
+        logging.warning("Non-existent time %s in %s: %s", naive_dt, tz, e)
+        # shift by +1h
+        return tz.localize(naive_dt + timedelta(hours=1), is_dst=True)
 
 
 def normalize_students(students: Dict[str, Any]) -> bool:
@@ -151,6 +167,58 @@ def normalize_students(students: Dict[str, Any]) -> bool:
             )
             changed_any = True
     return changed_any
+
+
+def migrate_student_dates(students: Dict[str, Any]) -> bool:
+    """Migrate naive date strings to ISO 8601 with offsets."""
+    changed = False
+    for student in students.values():
+        tz = student_timezone(student)
+        # class dates
+        new_dates = []
+        converted = False
+        for item in student.get("class_dates", []):
+            if isinstance(item, str) and ("T" in item or "+" in item or item.endswith("Z")):
+                new_dates.append(item)
+            else:
+                try:
+                    dt = safe_localize(tz, datetime.strptime(item, "%Y-%m-%d %H:%M"))
+                    new_dates.append(dt.isoformat())
+                    converted = True
+                except Exception:
+                    continue
+        if converted:
+            student["class_dates"] = sorted(new_dates)
+            changed = True
+        # cancelled dates
+        new_cancel = []
+        converted_cancel = False
+        for item in student.get("cancelled_dates", []):
+            if isinstance(item, str) and ("T" in item or "+" in item or item.endswith("Z")):
+                new_cancel.append(item)
+            else:
+                try:
+                    dt = safe_localize(tz, datetime.strptime(item, "%Y-%m-%d %H:%M"))
+                    new_cancel.append(dt.isoformat())
+                    converted_cancel = True
+                except Exception:
+                    continue
+        if converted_cancel:
+            student["cancelled_dates"] = new_cancel
+            changed = True
+        # pending cancel
+        pending = student.get("pending_cancel")
+        if pending:
+            for field in ["class_time", "requested_at"]:
+                item = pending.get(field)
+                if item and "T" not in item:
+                    try:
+                        dt = safe_localize(tz, datetime.strptime(item, "%Y-%m-%d %H:%M"))
+                        pending[field] = dt.isoformat()
+                        changed = True
+                    except Exception:
+                        continue
+    return changed
 
 
 # Conversation states for adding a student
@@ -185,7 +253,10 @@ def load_students() -> Dict[str, Any]:
         except json.JSONDecodeError:
             logging.error("Failed to parse students.json; starting with empty database.")
             return {}
-    if normalize_students(students):
+    changed = normalize_students(students)
+    if migrate_student_dates(students):
+        changed = True
+    if changed:
         # One-time migration: persist upgraded student records
         save_students(students)
     return students
@@ -227,8 +298,9 @@ def parse_schedule(
     ``schedule_str`` is a comma separated string such as
     "Monday 17:00, Thursday 17:00". ``start_date`` marks the beginning of
     the cycle.  For each entry we compute all occurrences within
-    ``cycle_weeks`` weeks and return a list of ``YYYY-MM-DD HH:MM`` strings
-    in chronological order.  The dates are interpreted in ``tz_name``.
+    ``cycle_weeks`` weeks and return a list of ISO8601 strings with
+    timezone offsets in chronological order. The dates are interpreted in
+    ``tz_name``.
     """
     if start_date is None:
         start_date = date.today()
@@ -236,14 +308,14 @@ def parse_schedule(
     entries = [item.strip() for item in schedule_str.split(",") if item.strip()]
     if not entries:
         return []
-    start_dt = tz.localize(datetime.combine(start_date, time.min))
-    end_dt = start_dt + timedelta(weeks=cycle_weeks)
+    start_dt = safe_localize(tz, datetime.combine(start_date, time.min))
+    end_dt = tz.normalize(start_dt + timedelta(weeks=cycle_weeks))
     results: List[str] = []
     for entry in entries:
         next_dt = next_occurrence(entry, now=start_dt)
         while next_dt < end_dt:
-            results.append(next_dt.strftime("%Y-%m-%d %H:%M"))
-            next_dt += timedelta(weeks=1)
+            results.append(next_dt.isoformat())
+            next_dt = tz.normalize(next_dt + timedelta(weeks=1))
     results.sort()
     return results
 
@@ -258,19 +330,16 @@ def parse_renewal_date(date_str: str) -> Optional[str]:
         return None
 
 
-def next_occurrence(day_time_str: str, now: Optional[datetime] = None) -> datetime:
+def next_occurrence(day_time_str: str, now: datetime) -> datetime:
     """Given a schedule entry like "Monday 17:00", return the next datetime
     after `now` that matches that weekday and time.
 
-    If `now` is None the current UTC time is used.  The function
-    currently assumes naive datetime objects representing local time.
-    
-    Example: if today is Monday at 16:00 and schedule is "Monday 17:00",
-    the next occurrence will be today at 17:00.  If it's already past
-    17:00, the result will be next week.
+    ``now`` must be timezone-aware.  Example: if today is Monday at 16:00
+    and schedule is "Monday 17:00", the next occurrence will be today at
+    17:00.  If it's already past 17:00, the result will be next week.
     """
-    if now is None:
-        now = datetime.now()
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        raise ValueError("now must be timezone-aware")
     try:
         day_name, time_str = day_time_str.split()
         hour, minute = map(int, time_str.split(":"))
@@ -289,10 +358,12 @@ def next_occurrence(day_time_str: str, now: Optional[datetime] = None) -> dateti
             raise ValueError
         # Build candidate datetime for this week
         days_ahead = (weekday - now.weekday()) % 7
-        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=days_ahead)
+        candidate = now + timedelta(days=days_ahead)
+        candidate = candidate.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        candidate = now.tzinfo.normalize(candidate)
         # If candidate is before now, push to next week
         if candidate <= now:
-            candidate += timedelta(days=7)
+            candidate = now.tzinfo.normalize(candidate + timedelta(days=7))
         return candidate
     except Exception:
         # If parsing fails just return now + 1 hour as fallback
@@ -303,9 +374,9 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
     """Return upcoming class datetimes in the student's timezone.
 
     ``student['class_dates']`` stores concrete class datetimes as
-    ``YYYY-MM-DD HH:MM`` strings in the student's local timezone.  This
-    function converts them to aware ``datetime`` objects, filters out past
-    or cancelled classes and returns the next ``count`` items.
+    ISO 8601 strings with timezone offsets in the student's local timezone.
+    This function converts them to aware ``datetime`` objects, filters out
+    past or cancelled classes and returns the next ``count`` items.
     """
     tz = student_timezone(student)
     now = datetime.now(tz)
@@ -313,16 +384,115 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
     results: List[datetime] = []
     for item in student.get("class_dates", []):
         try:
-            dt = tz.localize(datetime.strptime(item, "%Y-%m-%d %H:%M"))
+            dt = datetime.fromisoformat(item)
         except Exception:
-            continue
+            try:
+                dt = safe_localize(tz, datetime.strptime(item, "%Y-%m-%d %H:%M"))
+            except Exception:
+                continue
         if dt <= now:
             continue
-        if item in cancelled:
+        if item in cancelled or dt.isoformat() in cancelled:
             continue
         results.append(dt)
     results.sort()
     return results[:count]
+
+
+async def send_class_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job to send a reminder before a class."""
+    data = context.job.data or {}
+    student_key = data.get("student_key")
+    class_dt_str = data.get("class_dt")
+    if not student_key or not class_dt_str:
+        return
+    students = load_students()
+    student = students.get(student_key)
+    if not student or student.get("paused"):
+        return
+    chat_id = student.get("telegram_id")
+    if not chat_id:
+        return
+    try:
+        class_dt = datetime.fromisoformat(class_dt_str)
+    except Exception:
+        return
+    tz = student_timezone(student)
+    local_dt = class_dt.astimezone(tz)
+    msg = f"Reminder: you have a class at {local_dt.strftime('%Y-%m-%d %H:%M %Z')}"
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception:
+        logging.warning("Failed to send class reminder to %s", student.get("name"))
+
+
+def schedule_student_reminders(
+    application: Application,
+    student_key: str,
+    student: Dict[str, Any],
+    reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
+) -> None:
+    """Schedule reminder jobs for all future classes of a student."""
+    tz = student_timezone(student)
+    now = datetime.now(tz)
+    prefix = f"class_reminder:{student_key}:"
+    # remove existing reminder jobs for this student
+    for job in application.job_queue.jobs():
+        if job.name and job.name.startswith(prefix):
+            job.schedule_removal()
+    for item in student.get("class_dates", []):
+        if item in student.get("cancelled_dates", []):
+            continue
+        try:
+            class_dt = datetime.fromisoformat(item)
+        except Exception:
+            continue
+        run_time = class_dt - reminder_offset
+        if run_time <= now:
+            continue
+        application.job_queue.run_once(
+            send_class_reminder,
+            when=run_time,
+            name=f"{prefix}{item}",
+            data={"student_key": student_key, "class_dt": item},
+        )
+
+
+def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[int] = None) -> bool:
+    """Ensure class_dates extend at least ``horizon_weeks`` into the future."""
+    if horizon_weeks is None:
+        horizon_weeks = student.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
+    tz = student_timezone(student)
+    now = datetime.now(tz)
+    class_dates = student.get("class_dates", [])
+    parsed = []
+    for item in class_dates:
+        try:
+            parsed.append(datetime.fromisoformat(item))
+        except Exception:
+            continue
+    parsed.sort()
+    latest = parsed[-1] if parsed else None
+    horizon = now + timedelta(weeks=horizon_weeks)
+    added = False
+    if (not latest) or latest < horizon:
+        schedule_pattern = student.get("schedule_pattern", "")
+        if schedule_pattern:
+            start_date = (latest if latest else now).date()
+            new_dates = parse_schedule(
+                schedule_pattern,
+                start_date=start_date,
+                cycle_weeks=horizon_weeks,
+                tz_name=tz.zone,
+            )
+            for dt_str in new_dates:
+                dt = datetime.fromisoformat(dt_str)
+                if latest and dt <= latest:
+                    continue
+                class_dates.append(dt.isoformat())
+                added = True
+            class_dates.sort()
+    return added
 
 
 def admin_only(func):
@@ -513,7 +683,7 @@ async def add_color(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         tz_name=tz_name,
     )
 
-    students[key] = {
+    student = {
         "name": context.user_data.get("name"),
         "telegram_id": telegram_id,
         "telegram_handle": handle,
@@ -532,7 +702,10 @@ async def add_color(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "color_code": context.user_data.get("color_code", ""),
         "notes": [],
     }
+    ensure_future_class_dates(student)
+    students[key] = student
     save_students(students)
+    schedule_student_reminders(context.application, key, student)
     await update.message.reply_text(f"Added student {context.user_data.get('name')} successfully!")
     return ConversationHandler.END
 
@@ -799,7 +972,7 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     class_time_str = pending_cancel.get("class_time")
     try:
-        datetime.strptime(class_time_str, "%Y-%m-%d %H:%M")
+        datetime.fromisoformat(class_time_str)
     except Exception:
         await update.message.reply_text("Invalid class time format; cancellation not confirmed.")
         return
@@ -821,7 +994,13 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
         )
         log_status = "missed (late cancel)"
     student.pop("pending_cancel", None)
+    ensure_future_class_dates(student)
     save_students(students)
+    # remove any scheduled reminder for this class and reschedule remaining
+    for job in context.application.job_queue.jobs():
+        if job.name == f"class_reminder:{student_key}:{class_time_str}":
+            job.schedule_removal()
+    schedule_student_reminders(context.application, student_key, student)
     logs = load_logs()
     logs.append(
         {
@@ -970,8 +1149,8 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     cutoff = student.get("cutoff_hours", DEFAULT_CUTOFF_HOURS)
     cancel_type = "early" if now_tz <= selected_dt - timedelta(hours=cutoff) else "late"
     student["pending_cancel"] = {
-        "class_time": selected_dt.strftime("%Y-%m-%d %H:%M"),
-        "requested_at": now_tz.strftime("%Y-%m-%d %H:%M"),
+        "class_time": selected_dt.isoformat(),
+        "requested_at": now_tz.isoformat(),
         "type": cancel_type,
     }
     save_students(students)
@@ -1201,6 +1380,14 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:", block=False))
     application.add_handler(CallbackQueryHandler(student_button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Ensure schedules extend into the future and reminders are set
+    students = load_students()
+    changed = False
+    for key, student in students.items():
+        changed |= ensure_future_class_dates(student)
+        schedule_student_reminders(application, key, student)
+    if changed:
+        save_students(students)
     # Job queue for reminders and monthly export
     # Renewal reminders at 09:00 every day (timezone-aware)
     application.job_queue.run_daily(renewal_reminder_job, time=time(hour=9, minute=0, tzinfo=tz))
