@@ -112,10 +112,14 @@ BKK_TZ = pytz.timezone("Asia/Bangkok")
     ADD_PRICE,
     ADD_CLASSES,
     ADD_SCHEDULE,
+    ADD_CUTOFF,
+    ADD_WEEKS,
+    ADD_DURATION,
+    ADD_TIMEZONE,
     ADD_RENEWAL,
     ADD_COLOR,
     CONFIRM_ADD,
-) = range(8)
+) = range(12)
 
 # States for rescheduling classes
 (RESCHEDULE_SELECT, RESCHEDULE_TIME, RESCHEDULE_CONFIRM) = range(20, 23)
@@ -344,7 +348,67 @@ async def add_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         schedule = []
     context.user_data["class_schedule"] = schedule
     await update.message.reply_text(
-        "Enter the renewal date (YYYY-MM-DD). This is when the student is expected to renew payment:",
+        "Enter cutoff hours before class for cancellation (e.g., 24):"
+    )
+    return ADD_CUTOFF
+
+
+async def add_cutoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        cutoff = int(update.message.text.strip())
+        if cutoff < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Invalid number. Enter hours before class (e.g., 24):"
+        )
+        return ADD_CUTOFF
+    context.user_data["cutoff_hours"] = cutoff
+    await update.message.reply_text(
+        "Enter number of weeks in cycle (e.g., 4):"
+    )
+    return ADD_WEEKS
+
+
+async def add_weeks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        weeks = int(update.message.text.strip())
+        if weeks <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Invalid number. Enter number of weeks (e.g., 4):"
+        )
+        return ADD_WEEKS
+    context.user_data["cycle_weeks"] = weeks
+    await update.message.reply_text(
+        "Enter class duration in hours (e.g., 1.5):"
+    )
+    return ADD_DURATION
+
+
+async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        duration = float(update.message.text.strip())
+        if duration <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Invalid duration. Enter hours like 1 or 1.5:"
+        )
+        return ADD_DURATION
+    context.user_data["class_duration_hours"] = duration
+    await update.message.reply_text(
+        "Enter student timezone (e.g., Asia/Bangkok):"
+    )
+    return ADD_TIMEZONE
+
+
+async def add_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    tz_input = update.message.text.strip()
+    context.user_data["student_timezone"] = tz_input
+    await update.message.reply_text(
+        "Enter the renewal date (YYYY-MM-DD). This is when the student is expected to renew payment:"
     )
     return ADD_RENEWAL
 
@@ -384,6 +448,10 @@ async def add_color(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "plan_price": context.user_data.get("plan_price"),
         "renewal_date": context.user_data.get("renewal_date"),
         "class_schedule": context.user_data.get("class_schedule"),
+        "cutoff_hours": context.user_data.get("cutoff_hours"),
+        "cycle_weeks": context.user_data.get("cycle_weeks"),
+        "class_duration_hours": context.user_data.get("class_duration_hours"),
+        "student_timezone": context.user_data.get("student_timezone"),
         "paused": False,
         "silent_mode": False,
         "free_class_credit": 0,
@@ -1125,15 +1193,19 @@ def main() -> None:
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_HANDLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_handle)],
-            ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_price)],
-            ADD_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_classes)],
-            ADD_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_schedule)],
-            ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
-            ADD_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_color)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_conversation)],
-        allow_reentry=True,
-    )
+        ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_price)],
+        ADD_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_classes)],
+        ADD_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_schedule)],
+        ADD_CUTOFF: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_cutoff)],
+        ADD_WEEKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_weeks)],
+        ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_duration)],
+        ADD_TIMEZONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_timezone)],
+        ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
+        ADD_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_color)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel_conversation)],
+    allow_reentry=True,
+)
     application.add_handler(conv_handler)
     # Admin commands
     application.add_handler(CommandHandler("logclass", log_class_command))
