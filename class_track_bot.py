@@ -1145,6 +1145,62 @@ async def reschedule_student_command(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text(msg)
 
 
+@admin_only
+async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove a student record and cancel scheduled reminders.
+
+    Usage: /removestudent <student_key> [reason]
+    Run once to prompt confirmation, then repeat with ``confirm`` to finalize.
+    """
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /removestudent <student_key> [reason]"
+        )
+        return
+
+    student_key = args[0]
+    confirm = len(args) > 1 and args[1].lower() == "confirm"
+    reason = " ".join(args[2:]) if confirm and len(args) > 2 else ""
+
+    students = load_students()
+    if student_key not in students:
+        await update.message.reply_text(f"Student '{student_key}' not found.")
+        return
+
+    if not confirm:
+        await update.message.reply_text(
+            "Are you sure you want to remove"
+            f" {students[student_key].get('name', student_key)}? "
+            f"Run /removestudent {student_key} confirm [reason] to confirm."
+        )
+        return
+
+    student = students.pop(student_key)
+    save_students(students)
+
+    prefix = f"class_reminder:{student_key}:"
+    for job in context.application.job_queue.jobs():
+        if job.name and job.name.startswith(prefix):
+            job.schedule_removal()
+
+    logs = load_logs()
+    logs.append(
+        {
+            "student": student_key,
+            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
+            "status": "removed",
+            "note": reason,
+            "admin": update.effective_user.id,
+        }
+    )
+    save_logs(logs)
+
+    await update.message.reply_text(
+        f"Removed {student.get('name', student_key)} from records."
+    )
+
+
 # -----------------------------------------------------------------------------
 # Student interface handlers
 # -----------------------------------------------------------------------------
@@ -1485,6 +1541,7 @@ def main() -> None:
     application.add_handler(CommandHandler("dashboard", dashboard_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
+    application.add_handler(CommandHandler("removestudent", remove_student_command))
 
     # Student handlers
     application.add_handler(CommandHandler("start", start_command))
