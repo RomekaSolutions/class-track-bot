@@ -104,6 +104,48 @@ LOGS_FILE = "logs.json"
 # Bangkok timezone used for cancellation cutoff comparisons
 BKK_TZ = pytz.timezone("Asia/Bangkok")
 
+# Default values for new student fields
+DEFAULT_CUTOFF_HOURS = 24
+DEFAULT_CYCLE_WEEKS = 4
+DEFAULT_DURATION_HOURS = 1.0
+DEFAULT_STUDENT_TZ = "Asia/Bangkok"
+
+
+def is_valid_timezone(tz: str) -> bool:
+    """Return True if ``tz`` is a known IANA timezone string."""
+    return tz in pytz.all_timezones
+
+
+def normalize_students(students: Dict[str, Any]) -> bool:
+    """Ensure all student records contain required fields.
+
+    Injects defaults for legacy students. Returns True if any student was
+    modified so callers may persist the upgraded data.
+    """
+    changed_any = False
+    for key, student in students.items():
+        changed = False
+        if "cutoff_hours" not in student:
+            student["cutoff_hours"] = DEFAULT_CUTOFF_HOURS
+            changed = True
+        if "cycle_weeks" not in student:
+            student["cycle_weeks"] = DEFAULT_CYCLE_WEEKS
+            changed = True
+        if "class_duration_hours" not in student:
+            student["class_duration_hours"] = DEFAULT_DURATION_HOURS
+            changed = True
+        tz = student.get("student_timezone")
+        if not is_valid_timezone(tz if tz else ""):
+            student["student_timezone"] = DEFAULT_STUDENT_TZ
+            changed = True
+        if changed:
+            logging.info(
+                "Applied default fields for legacy student %s",
+                student.get("name", key),
+            )
+            changed_any = True
+    return changed_any
+
 
 # Conversation states for adding a student
 (
@@ -125,21 +167,26 @@ BKK_TZ = pytz.timezone("Asia/Bangkok")
 
 
 def load_students() -> Dict[str, Any]:
-    """Load students from the JSON file.  If none exists return an empty dict."""
+    """Load students from the JSON file and normalize legacy records."""
     if not os.path.exists(STUDENTS_FILE):
         return {}
     with open(STUDENTS_FILE, "r", encoding="utf-8") as f:
         try:
             data = json.load(f)
             if isinstance(data, dict):
-                return data
-            # If stored as list in earlier versions, convert to dict keyed by telegram_id
-            if isinstance(data, list):
-                return {str(item["telegram_id"]): item for item in data}
+                students = data
+            elif isinstance(data, list):
+                # If stored as list in earlier versions, convert to dict keyed by telegram_id
+                students = {str(item["telegram_id"]): item for item in data}
+            else:
+                students = {}
         except json.JSONDecodeError:
             logging.error("Failed to parse students.json; starting with empty database.")
             return {}
-    return {}
+    if normalize_students(students):
+        # One-time migration: persist upgraded student records
+        save_students(students)
+    return students
 
 
 def save_students(students: Dict[str, Any]) -> None:
@@ -347,7 +394,7 @@ async def add_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         schedule = []
     context.user_data["class_schedule"] = schedule
     await update.message.reply_text(
-        "Enter cutoff hours before class for cancellation (e.g., 24):"
+        "Hours before class when cancellations are 'no deduction' (e.g., 24):"
     )
     return ADD_CUTOFF
 
@@ -355,16 +402,16 @@ async def add_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def add_cutoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         cutoff = int(update.message.text.strip())
-        if cutoff < 0:
+        if cutoff < 0 or cutoff > 168:
             raise ValueError
     except ValueError:
         await update.message.reply_text(
-            "Invalid number. Enter hours before class (e.g., 24):"
+            "Invalid number. Hours before class when cancellations are 'no deduction' (0-168, e.g., 24):"
         )
         return ADD_CUTOFF
     context.user_data["cutoff_hours"] = cutoff
     await update.message.reply_text(
-        "Enter number of weeks in cycle (e.g., 4):"
+        "Length of the repeating cycle in weeks (e.g., 4 for a monthly cycle):"
     )
     return ADD_WEEKS
 
@@ -372,16 +419,16 @@ async def add_cutoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def add_weeks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         weeks = int(update.message.text.strip())
-        if weeks <= 0:
+        if weeks <= 0 or weeks > 26:
             raise ValueError
     except ValueError:
         await update.message.reply_text(
-            "Invalid number. Enter number of weeks (e.g., 4):"
+            "Invalid number. Length of the repeating cycle in weeks (1-26, e.g., 4):"
         )
         return ADD_WEEKS
     context.user_data["cycle_weeks"] = weeks
     await update.message.reply_text(
-        "Enter class duration in hours (e.g., 1.5):"
+        "Class length in hours (e.g., 1.5 for 90 minutes):"
     )
     return ADD_DURATION
 
@@ -393,18 +440,26 @@ async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             raise ValueError
     except ValueError:
         await update.message.reply_text(
-            "Invalid duration. Enter hours like 1 or 1.5:"
+            "Invalid duration. Class length in hours (0.5-4.0, e.g., 1.5):"
         )
         return ADD_DURATION
+    duration = max(0.5, min(4.0, duration))
+    duration = round(duration * 4) / 4
     context.user_data["class_duration_hours"] = duration
     await update.message.reply_text(
-        "Enter student timezone (e.g., Asia/Bangkok):"
+        "Enter IANA timezone (e.g., Asia/Bangkok, Europe/London):"
     )
     return ADD_TIMEZONE
 
 
 async def add_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     tz_input = update.message.text.strip()
+    if not is_valid_timezone(tz_input):
+        logging.warning("Invalid timezone input: %s", tz_input)
+        await update.message.reply_text(
+            "Unknown timezone. Examples: Asia/Bangkok, Europe/London. Please enter a valid IANA timezone:"
+        )
+        return ADD_TIMEZONE
     context.user_data["student_timezone"] = tz_input
     await update.message.reply_text(
         "Enter the renewal date (YYYY-MM-DD). This is when the student is expected to renew payment:"
