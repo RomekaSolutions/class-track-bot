@@ -138,6 +138,18 @@ def safe_localize(tz: pytz.timezone, naive_dt: datetime) -> datetime:
         return tz.localize(naive_dt + timedelta(hours=1), is_dst=True)
 
 
+def parse_student_datetime(dt_str: str, student: Dict[str, Any]) -> datetime:
+    """Parse ``dt_str`` and return an aware datetime in the student's timezone."""
+    dt_str = dt_str.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(dt_str)
+    except ValueError as e:
+        raise ValueError(f"Invalid datetime: {dt_str}") from e
+    if dt.tzinfo is None:
+        dt = safe_localize(student_timezone(student), dt)
+    return dt
+
+
 def normalize_students(students: Dict[str, Any]) -> bool:
     """Ensure all student records contain required fields.
 
@@ -430,6 +442,30 @@ async def send_class_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         logging.warning("Failed to send class reminder to %s", student.get("name"))
 
 
+def schedule_class_reminder(
+    application: Application,
+    student_key: str,
+    student: Dict[str, Any],
+    class_dt_str: str,
+    reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
+) -> None:
+    tz = student_timezone(student)
+    now = datetime.now(tz)
+    try:
+        class_dt = datetime.fromisoformat(class_dt_str)
+    except Exception:
+        return
+    run_time = class_dt - reminder_offset
+    if run_time <= now:
+        return
+    application.job_queue.run_once(
+        send_class_reminder,
+        when=run_time,
+        name=f"class_reminder:{student_key}:{class_dt_str}",
+        data={"student_key": student_key, "class_dt": class_dt_str},
+    )
+
+
 def schedule_student_reminders(
     application: Application,
     student_key: str,
@@ -437,8 +473,6 @@ def schedule_student_reminders(
     reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
 ) -> None:
     """Schedule reminder jobs for all future classes of a student."""
-    tz = student_timezone(student)
-    now = datetime.now(tz)
     prefix = f"class_reminder:{student_key}:"
     # remove existing reminder jobs for this student
     for job in application.job_queue.jobs():
@@ -447,18 +481,8 @@ def schedule_student_reminders(
     for item in student.get("class_dates", []):
         if item in student.get("cancelled_dates", []):
             continue
-        try:
-            class_dt = datetime.fromisoformat(item)
-        except Exception:
-            continue
-        run_time = class_dt - reminder_offset
-        if run_time <= now:
-            continue
-        application.job_queue.run_once(
-            send_class_reminder,
-            when=run_time,
-            name=f"{prefix}{item}",
-            data={"student_key": student_key, "class_dt": item},
+        schedule_class_reminder(
+            application, student_key, student, item, reminder_offset
         )
 
 
@@ -1043,40 +1067,82 @@ async def reschedule_student_command(update: Update, context: ContextTypes.DEFAU
 
     student = students[student_key]
     try:
-        datetime.fromisoformat(old_str)
-        datetime.fromisoformat(new_str)
+        old_dt = parse_student_datetime(old_str, student)
+        new_dt = parse_student_datetime(new_str, student)
     except ValueError:
         await update.message.reply_text("Datetimes must be in ISO 8601 format.")
         return
 
+    tz = student_timezone(student)
+    if new_dt <= datetime.now(tz):
+        await update.message.reply_text("Cannot reschedule into the past.")
+        return
+
     class_dates = student.get("class_dates", [])
-    if old_str not in class_dates:
+    original_dates = set(class_dates)
+    old_item = None
+    for item in class_dates:
+        try:
+            if parse_student_datetime(item, student) == old_dt:
+                old_item = item
+                break
+        except ValueError:
+            continue
+    if not old_item:
         await update.message.reply_text("Old datetime not found in student's schedule.")
         return
 
-    class_dates.remove(old_str)
-    if new_str not in class_dates:
-        class_dates.append(new_str)
-    class_dates.sort()
+    class_dates.remove(old_item)
+    exists = any(
+        parse_student_datetime(item, student) == new_dt for item in class_dates
+    )
+    new_dt_str = new_dt.isoformat()
+    if not exists:
+        class_dates.append(new_dt_str)
+
+    cancelled_dates = student.get("cancelled_dates", [])
+    warn_msg = ""
+    for idx, c_item in enumerate(list(cancelled_dates)):
+        try:
+            if parse_student_datetime(c_item, student) == new_dt:
+                cancelled_dates.pop(idx)
+                warn_msg = "New datetime was in cancelled dates; removing."
+                break
+        except ValueError:
+            continue
+    student["cancelled_dates"] = cancelled_dates
+
+    class_dates.sort(key=lambda x: parse_student_datetime(x, student))
     student["class_dates"] = class_dates
     ensure_future_class_dates(student)
     save_students(students)
-    schedule_student_reminders(context.application, student_key, student)
+
+    # Update reminder jobs: remove old, add new and any newly generated future dates
+    prefix = f"class_reminder:{student_key}:"
+    for job in context.application.job_queue.jobs():
+        if job.name == f"{prefix}{old_item}":
+            job.schedule_removal()
+            break
+    added_dates = set(student.get("class_dates", [])) - original_dates
+    for dt_str in added_dates:
+        schedule_class_reminder(context.application, student_key, student, dt_str)
 
     logs = load_logs()
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
-            "status": f"rescheduled:{old_str}->{new_str}",
+            "date": datetime.now(tz).strftime("%Y-%m-%d"),
+            "status": f"rescheduled:{old_item}->{new_dt_str}",
             "note": "admin_reschedule",
+            "admin": update.effective_user.id,
         }
     )
     save_logs(logs)
 
-    await update.message.reply_text(
-        f"Rescheduled {student.get('name', student_key)} from {old_str} to {new_str}."
-    )
+    msg = f"Rescheduled {student.get('name', student_key)} from {old_item} to {new_dt_str}."
+    if warn_msg:
+        msg += f" {warn_msg}"
+    await update.message.reply_text(msg)
 
 
 # -----------------------------------------------------------------------------
