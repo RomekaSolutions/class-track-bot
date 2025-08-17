@@ -11,7 +11,7 @@ students and view summaries via a private dashboard.
 The bot is designed around a flat‑file JSON database stored in
 ``students.json`` and ``logs.json``.  Each student entry contains
 their name, Telegram identifier, payment plan, schedule, renewal date
-and various flags (paused, silent mode, free class credits etc.).
+and various flags (paused, free class credits etc.).
 The logs file records every class interaction (completed, missed,
 cancelled, rescheduled) along with optional notes.
 
@@ -161,10 +161,6 @@ def normalize_students(students: Dict[str, Any]) -> bool:
     ADD_RENEWAL,
     ADD_COLOR,
 ) = range(11)
-
-# States for rescheduling classes
-(RESCHEDULE_SELECT, RESCHEDULE_TIME, RESCHEDULE_CONFIRM) = range(20, 23)
-
 
 def load_students() -> Dict[str, Any]:
     """Load students from the JSON file and normalize legacy records."""
@@ -507,7 +503,6 @@ async def add_color(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "class_duration_hours": context.user_data.get("class_duration_hours"),
         "student_timezone": context.user_data.get("student_timezone"),
         "paused": False,
-        "silent_mode": False,
         "free_class_credit": 0,
         "reschedule_credit": 0,
         "color_code": context.user_data.get("color_code", ""),
@@ -864,17 +859,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     buttons = []
     buttons.append([InlineKeyboardButton("📅 My Classes", callback_data="my_classes")])
     buttons.append([InlineKeyboardButton("❌ Cancel Class", callback_data="cancel_class")])
-    # Show reschedule button only if user is admin and has credit
-    if student.get("reschedule_credit", 0) > 0 and user.id in ADMIN_IDS:
-        buttons.append([InlineKeyboardButton("🔄 Reschedule Class", callback_data="reschedule_class")])
     # Show free class credit info if available
     if student.get("free_class_credit", 0) > 0:
         buttons.append([InlineKeyboardButton("🎁 Free Class Credit", callback_data="free_credit")])
-    # Silent mode toggle
-    if student.get("silent_mode"):
-        buttons.append([InlineKeyboardButton("🔔 Enable Reminders", callback_data="silent_toggle")])
-    else:
-        buttons.append([InlineKeyboardButton("📳 Silent Mode", callback_data="silent_toggle")])
     reply_markup = InlineKeyboardMarkup(buttons)
     await update.message.reply_text("\n".join(message_lines), reply_markup=reply_markup)
 
@@ -894,15 +881,8 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         await show_my_classes(query, student)
     elif data == "cancel_class":
         await initiate_cancel_class(query, student)
-    elif data == "reschedule_class":
-        if query.from_user.id not in ADMIN_IDS:
-            await query.edit_message_text("Rescheduling is currently unavailable.")
-            return
-        await initiate_reschedule(query, student, context)
     elif data == "free_credit":
         await show_free_credit(query, student)
-    elif data == "silent_toggle":
-        await toggle_silent_mode(query, students, student)
     else:
         await query.edit_message_text("Unknown action.")
 
@@ -981,74 +961,8 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(message)
 
 
-async def initiate_reschedule(query, student: Dict[str, Any], context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Begin the rescheduling process.  Ask for proposed new time.
-
-    This function now accepts the callback context so that we can store
-    state in ``context.bot_data``.  A reschedule credit must be
-    available for the student to proceed.  The student's ``reschedule_credit``
-    count is not decremented here; it is decremented when the user
-    actually submits a new time.
-    """
-    if student.get("reschedule_credit", 0) <= 0:
-        await query.edit_message_text("You do not have any reschedule credits.")
-        return
-    # Ask the user to send a proposed new time
-    await query.edit_message_text(
-        "Please enter your proposed new class time (e.g., '2024-07-15 17:00'). "
-        "Your teacher will confirm this change."
-    )
-    # Mark the user as awaiting reschedule time
-    reschedule_ctx = context.bot_data.setdefault("reschedule_context", {})
-    reschedule_ctx[query.from_user.id] = {
-        "stage": RESCHEDULE_TIME,
-    }
-
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Catch all handler for plain text messages from students, used for rescheduling."""
-    user_id = update.effective_user.id
-    # Check if the user is in reschedule context
-    resched_ctx = context.bot_data.get("reschedule_context", {})
-    if user_id in resched_ctx and resched_ctx[user_id]["stage"] == RESCHEDULE_TIME:
-        proposed = update.message.text.strip()
-        # Basic validation of datetime format
-        try:
-            proposed_dt = datetime.strptime(proposed, "%Y-%m-%d %H:%M")
-        except ValueError:
-            await update.message.reply_text("Invalid format. Please use YYYY-MM-DD HH:MM:")
-            return
-        students = load_students()
-        student = students.get(str(user_id))
-        if not student:
-            await update.message.reply_text("You are not recognised. Please contact your teacher.")
-            return
-        # Deduct reschedule credit
-        student["reschedule_credit"] -= 1
-        # Save pending reschedule request
-        student["pending_reschedule"] = {
-            "proposed_time": proposed_dt.strftime("%Y-%m-%d %H:%M"),
-            "requested_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
-        save_students(students)
-        # Log reschedule request
-        logs = load_logs()
-        logs.append(
-            {
-                "student": str(user_id),
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "status": "reschedule_requested",
-                "note": proposed_dt.strftime("%Y-%m-%d %H:%M"),
-            }
-        )
-        save_logs(logs)
-        # Clear reschedule context
-        resched_ctx.pop(user_id, None)
-        await update.message.reply_text(
-            "Your reschedule request has been sent to your teacher. They will confirm with you shortly."
-        )
-        return
-    # For any other plain message, we do nothing or inform
+    """Catch all handler for plain text messages from students."""
     await update.message.reply_text(
         "I'm sorry, I didn't understand that. Please use the menu buttons or commands."
     )
@@ -1064,18 +978,6 @@ async def show_free_credit(query, student: Dict[str, Any]) -> None:
     await query.edit_message_text(msg)
 
 
-async def toggle_silent_mode(query, students: Dict[str, Any], student: Dict[str, Any]) -> None:
-    """Toggle the student's silent mode state."""
-    user_id = str(query.from_user.id)
-    student["silent_mode"] = not student.get("silent_mode", False)
-    save_students(students)
-    if student["silent_mode"]:
-        msg = "Renewal reminders have been silenced for this month."
-    else:
-        msg = "Renewal reminders have been re-enabled."
-    await query.edit_message_text(msg)
-
-
 # -----------------------------------------------------------------------------
 # Automatic jobs (reminders, warnings, monthly export)
 # -----------------------------------------------------------------------------
@@ -1087,8 +989,6 @@ async def renewal_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     today = datetime.now().date()
     for key, student in students.items():
         if student.get("paused"):
-            continue
-        if student.get("silent_mode"):
             continue
         try:
             renewal_date = datetime.strptime(student["renewal_date"], "%Y-%m-%d").date()
