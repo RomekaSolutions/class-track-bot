@@ -62,10 +62,9 @@ from telegram.ext import (
     filters,
 )
 
-# Additional imports for timezone handling and custom job queue
+# Additional imports for timezone handling
 import pytz
 from pytz import AmbiguousTimeError, NonExistentTimeError
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 
 # -----------------------------------------------------------------------------
@@ -1584,18 +1583,14 @@ def main() -> None:
     # ----------------------------------------------------------------------
     # Configure JobQueue with a timezone-aware scheduler
     #
-    # APScheduler in python-telegram-bot requires a pytz timezone object. Without
-    # specifying a timezone, the default scheduler will raise a TypeError
-    # complaining that only pytz timezones are supported. We create an
-    # AsyncIOScheduler with our desired timezone (Bangkok by default) and
-    # provide it to a JobQueue instance.  The JobQueue is then passed to
-    # ApplicationBuilder so that the application uses our custom scheduler.
+    # APScheduler in python-telegram-bot requires a pytz timezone object. We
+    # specify our desired timezone (Bangkok by default), create a JobQueue, and
+    # pass it to the application.
     #
     # If you deploy this bot in a different locale, replace "Asia/Bangkok" with
     # your own timezone, e.g. "UTC" or "America/New_York".  See pytz
     # documentation for valid identifiers.
     tz = pytz.timezone("Asia/Bangkok")
-    scheduler = AsyncIOScheduler(timezone=tz)
     job_queue = JobQueue()
     application: Application = (
         ApplicationBuilder()
@@ -1658,12 +1653,13 @@ def main() -> None:
     application.job_queue.run_daily(renewal_reminder_job, time=time(hour=9, minute=0, tzinfo=tz))
     # Low class warnings at 10:00 every day (timezone-aware)
     application.job_queue.run_daily(low_class_warning_job, time=time(hour=10, minute=0, tzinfo=tz))
-    # Monthly export on the last day at 23:00 (timezone-aware)
-    # Use 'when' instead of 'time' and day=-1 to signify the last day of the month
+    # Monthly export on the last calendar day at 23:00 (timezone-aware)
+    # Use day=1 with last=True to shift to the month's last day
     application.job_queue.run_monthly(
         monthly_export_job,
         when=time(hour=23, minute=0, tzinfo=tz),
-        day=-1,
+        day=1,
+        last=True,
     )
     # Start the bot
     application.run_polling()
