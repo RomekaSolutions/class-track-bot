@@ -751,6 +751,8 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text(
                 f"Warning: {student['name']} has no classes remaining. Logging anyway."
             )
+    # After deducting, possibly notify the student about low or zero balance
+    await maybe_send_balance_warning(context.bot, student)
     save_students(students)
     # Record log
     logs = load_logs()
@@ -868,6 +870,8 @@ async def renew_student_command(update: Update, context: ContextTypes.DEFAULT_TY
     student = students[student_key]
     student["classes_remaining"] = student.get("classes_remaining", 0) + num_classes
     student["renewal_date"] = renewal
+    # Reset last balance warning upon renewal
+    student.pop("last_balance_warning", None)
     ensure_future_class_dates(student)
     save_students(students)
     schedule_student_reminders(context.application, student_key, student)
@@ -913,9 +917,9 @@ async def pause_student_command(update: Update, context: ContextTypes.DEFAULT_TY
 def generate_dashboard_summary() -> str:
     """Generate a textual summary for the dashboard command.
 
-    The summary includes today's classes, students with low class
-    balances, upcoming renewals, paused students, free class credits and
-    statistics about classes this month.
+    The summary includes today's classes, students approaching a zero
+    balance, paused students, free class credits and statistics about
+    classes this month.
     """
     students = load_students()
     logs = load_logs()
@@ -924,9 +928,9 @@ def generate_dashboard_summary() -> str:
     month_start = date(now_admin.year, now_admin.month, 1)
 
     today_classes: List[str] = []
-    low_balances: List[str] = []
-    upcoming_renewals: List[str] = []
-    overdue_renewals: List[str] = []
+    two_left: List[str] = []
+    one_left: List[str] = []
+    zero_left: List[str] = []
     paused_students: List[str] = []
     free_credits: List[str] = []
     # Stats counters
@@ -953,16 +957,6 @@ def generate_dashboard_summary() -> str:
     for key, student in students.items():
         tz = student_timezone(student)
         today_date = datetime.now(tz).date()
-        # Upcoming and overdue renewals (include paused students)
-        try:
-            renewal_date = datetime.strptime(student["renewal_date"], "%Y-%m-%d").date()
-            days_until = (renewal_date - today_date).days
-            if 0 <= days_until <= 7:
-                upcoming_renewals.append(f"{student['name']} ({student['renewal_date']})")
-            elif days_until < 0:
-                overdue_renewals.append(f"{student['name']} ({student['renewal_date']})")
-        except Exception:
-            pass
         # Skip further checks for paused students
         if student.get("paused"):
             paused_students.append(student["name"])
@@ -973,8 +967,13 @@ def generate_dashboard_summary() -> str:
                 today_classes.append(f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}")
                 break
         # Low class warnings
-        if student.get("classes_remaining", 0) <= 2:
-            low_balances.append(f"{student['name']} ({student['classes_remaining']} left)")
+        remaining = student.get("classes_remaining", 0)
+        if remaining == 2:
+            two_left.append(student["name"])
+        elif remaining == 1:
+            one_left.append(student["name"])
+        elif remaining == 0:
+            zero_left.append(student["name"])
         # Free credits
         if student.get("free_class_credit", 0) > 0:
             free_credits.append(f"{student['name']} ({student['free_class_credit']})")
@@ -984,14 +983,14 @@ def generate_dashboard_summary() -> str:
     summary_lines.append(f"Today's classes ({today_admin.isoformat()}):")
     summary_lines.extend([f"  - {item}" for item in (today_classes or ["None"])])
     summary_lines.append("")
-    summary_lines.append("Students with low class balance:")
-    summary_lines.extend([f"  - {item}" for item in (low_balances or ["None"])] )
+    summary_lines.append("Students with 2 classes left:")
+    summary_lines.extend([f"  - {item}" for item in (two_left or ["None"])] )
     summary_lines.append("")
-    summary_lines.append("Upcoming payment renewals (next 7 days):")
-    summary_lines.extend([f"  - {item}" for item in (upcoming_renewals or ["None"])] )
+    summary_lines.append("Students with 1 class left:")
+    summary_lines.extend([f"  - {item}" for item in (one_left or ["None"])] )
     summary_lines.append("")
-    summary_lines.append("Overdue payment renewals:")
-    summary_lines.extend([f"  - {item}" for item in (overdue_renewals or ["None"])] )
+    summary_lines.append("Students with 0 classes left:")
+    summary_lines.extend([f"  - {item}" for item in (zero_left or ["None"])] )
     summary_lines.append("")
     summary_lines.append("Paused students:")
     summary_lines.extend([f"  - {item}" for item in (paused_students or ["None"])] )
@@ -1097,6 +1096,7 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     else:
         if student.get("classes_remaining", 0) > 0:
             student["classes_remaining"] -= 1
+        await maybe_send_balance_warning(context.bot, student)
         response = (
             f"Cancellation confirmed for {student['name']}. One class deducted."
         )
@@ -1488,56 +1488,49 @@ async def show_free_credit(query, student: Dict[str, Any]) -> None:
 
 
 # -----------------------------------------------------------------------------
-# Automatic jobs (reminders, warnings, monthly export)
+# Automatic jobs (balance warnings, monthly export)
 # -----------------------------------------------------------------------------
+async def maybe_send_balance_warning(bot, student) -> bool:
+    """Send a warning to the student if their balance is low.
 
-async def renewal_reminder_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send renewal reminders to students who are approaching their renewal date."""
-    bot = context.bot
-    students = load_students()
-    for key, student in students.items():
-        if student.get("paused"):
-            continue
-        tz = student_timezone(student)
-        today = datetime.now(tz).date()
-        try:
-            renewal_date = datetime.strptime(student["renewal_date"], "%Y-%m-%d").date()
-        except Exception:
-            continue
-        days_until = (renewal_date - today).days
-        if days_until in {3, 1, 0}:
+    Returns True if the student's record was modified (i.e., a warning was sent).
+    """
+    if student.get("paused"):
+        return False
+    remaining = student.get("classes_remaining", 0)
+    last_sent = student.get("last_balance_warning")
+    if remaining in {2, 1, 0} and last_sent != remaining:
+        telegram_id = student.get("telegram_id")
+        if not telegram_id:
+            return False
+        if remaining == 0:
             text = (
-                f"Hello {student['name']}, your plan renewal is due on {renewal_date}. "
-                f"You have {student.get('classes_remaining', 0)} classes remaining."
+                f"Hi {student['name']}, your plan has finished, please renew."
             )
-            telegram_id = student.get("telegram_id")
-            if telegram_id:
-                try:
-                    await bot.send_message(chat_id=telegram_id, text=text)
-                except Exception:
-                    logging.warning(f"Failed to send renewal reminder to {student['name']}")
+        else:
+            text = (
+                f"Hi {student['name']}, you have {remaining} class"
+                f"{'es' if remaining != 1 else ''} remaining in your plan."
+            )
+        try:
+            await bot.send_message(chat_id=telegram_id, text=text)
+            student["last_balance_warning"] = remaining
+            return True
+        except Exception:
+            logging.warning(f"Failed to send low class warning to {student['name']}")
+    return False
 
 
 async def low_class_warning_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send warnings to students when their remaining classes are low."""
     bot = context.bot
     students = load_students()
-    for key, student in students.items():
-        if student.get("paused"):
-            continue
-        if student.get("classes_remaining", 0) in {2, 1}:
-            telegram_id = student.get("telegram_id")
-            if not telegram_id:
-                continue
-            text = (
-                f"Hi {student['name']}, you have {student['classes_remaining']} class"
-                f"{'es' if student['classes_remaining'] > 1 else ''} remaining in your plan. "
-                "Please consider renewing soon."
-            )
-            try:
-                await bot.send_message(chat_id=telegram_id, text=text)
-            except Exception:
-                logging.warning(f"Failed to send low class warning to {student['name']}")
+    changed = False
+    for student in students.values():
+        if await maybe_send_balance_warning(bot, student):
+            changed = True
+    if changed:
+        save_students(students)
 
 
 async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1648,9 +1641,7 @@ def main() -> None:
         schedule_student_reminders(application, key, student)
     if changed:
         save_students(students)
-    # Job queue for reminders and monthly export
-    # Renewal reminders at 09:00 every day (timezone-aware)
-    application.job_queue.run_daily(renewal_reminder_job, time=time(hour=9, minute=0, tzinfo=tz))
+    # Job queue for balance warnings and monthly export
     # Low class warnings at 10:00 every day (timezone-aware)
     application.job_queue.run_daily(low_class_warning_job, time=time(hour=10, minute=0, tzinfo=tz))
     # Monthly export on the last calendar day at 23:00 (timezone-aware)
