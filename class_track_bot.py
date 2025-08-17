@@ -249,8 +249,7 @@ def migrate_student_dates(students: Dict[str, Any]) -> bool:
     ADD_DURATION,
     ADD_TIMEZONE,
     ADD_RENEWAL,
-    ADD_COLOR,
-) = range(11)
+) = range(10)
 
 def load_students() -> Dict[str, Any]:
     """Load students from the JSON file and normalize legacy records."""
@@ -680,22 +679,10 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("Invalid date format. Please use YYYY-MM-DD:")
         return ADD_RENEWAL
     context.user_data["renewal_date"] = renewal
-    await update.message.reply_text(
-        "Optional: assign a color code for external planner reference (or type 'skip'):"
-    )
-    return ADD_COLOR
-
-
-async def add_color(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    color_input = update.message.text.strip()
-    if color_input.lower() != "skip":
-        context.user_data["color_code"] = color_input
     # Build student record
     students = load_students()
-    # Determine Telegram ID; if only handle provided, we'll store as string until the user interacts
     telegram_id = context.user_data.get("telegram_id")
     handle = context.user_data.get("telegram_handle")
-    # Use handle or id as key
     key = str(telegram_id) if telegram_id else handle
     if key in students:
         await update.message.reply_text("A student with this identifier already exists. Aborting.")
@@ -727,7 +714,6 @@ async def add_color(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "paused": False,
         "free_class_credit": 0,
         "reschedule_credit": 0,
-        "color_code": context.user_data.get("color_code", ""),
         "notes": [],
     }
     ensure_future_class_dates(student)
@@ -891,6 +877,7 @@ def generate_dashboard_summary() -> str:
     today_classes: List[str] = []
     low_balances: List[str] = []
     upcoming_renewals: List[str] = []
+    overdue_renewals: List[str] = []
     paused_students: List[str] = []
     free_credits: List[str] = []
     # Stats counters
@@ -929,11 +916,14 @@ def generate_dashboard_summary() -> str:
         # Low class warnings
         if student.get("classes_remaining", 0) <= 2:
             low_balances.append(f"{student['name']} ({student['classes_remaining']} left)")
-        # Upcoming renewals within next 7 days
+        # Upcoming and overdue renewals
         try:
             renewal_date = datetime.strptime(student["renewal_date"], "%Y-%m-%d").date()
-            if 0 <= (renewal_date - today_date).days <= 7:
+            days_until = (renewal_date - today_date).days
+            if 0 <= days_until <= 7:
                 upcoming_renewals.append(f"{student['name']} ({student['renewal_date']})")
+            elif days_until < 0:
+                overdue_renewals.append(f"{student['name']} ({student['renewal_date']})")
         except Exception:
             pass
         # Free credits
@@ -950,6 +940,9 @@ def generate_dashboard_summary() -> str:
     summary_lines.append("")
     summary_lines.append("Upcoming payment renewals (next 7 days):")
     summary_lines.extend([f"  - {item}" for item in (upcoming_renewals or ["None"])] )
+    summary_lines.append("")
+    summary_lines.append("Overdue payment renewals:")
+    summary_lines.extend([f"  - {item}" for item in (overdue_renewals or ["None"])] )
     summary_lines.append("")
     summary_lines.append("Paused students:")
     summary_lines.extend([f"  - {item}" for item in (paused_students or ["None"])] )
@@ -972,6 +965,44 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Display a summary dashboard to the admin."""
     summary = generate_dashboard_summary()
     await update.message.reply_text(summary)
+
+
+@admin_only
+async def download_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate and send class logs for the specified month."""
+    args = context.args
+    if args:
+        try:
+            target = datetime.strptime(args[0], "%Y-%m")
+        except ValueError:
+            await update.message.reply_text("Invalid format. Use YYYY-MM.")
+            return
+    else:
+        target = datetime.now()
+    month_start = date(target.year, target.month, 1)
+    next_month = month_start.replace(day=28) + timedelta(days=4)
+    month_end = next_month - timedelta(days=next_month.day)
+    logs = load_logs()
+    month_logs = [
+        entry
+        for entry in logs
+        if month_start
+        <= datetime.strptime(entry["date"], "%Y-%m-%d").date()
+        <= month_end
+    ]
+    filename = f"class_logs_{month_start.strftime('%Y_%m')}.json"
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(month_logs, f, indent=2, ensure_ascii=False)
+        with open(filename, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=filename,
+                caption=f"Logs for {month_start.strftime('%Y-%m')}",
+            )
+    finally:
+        if os.path.exists(filename):
+            os.remove(filename)
 
 
 @admin_only
@@ -1542,7 +1573,6 @@ def main() -> None:
             ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_duration)],
             ADD_TIMEZONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_timezone)],
             ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
-            ADD_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_color)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
         allow_reentry=True,
@@ -1554,6 +1584,7 @@ def main() -> None:
     application.add_handler(CommandHandler("awardfree", award_free_command))
     application.add_handler(CommandHandler("pause", pause_student_command))
     application.add_handler(CommandHandler("dashboard", dashboard_command))
+    application.add_handler(CommandHandler("downloadmonth", download_month_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
     application.add_handler(CommandHandler("removestudent", remove_student_command))
