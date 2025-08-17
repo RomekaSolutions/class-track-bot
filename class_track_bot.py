@@ -1155,7 +1155,7 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
         "type": cancel_type,
     }
     save_students(students)
-    cutoff_str = cutoff_dt.strftime("%a %d %b %H:%M")
+    cutoff_str = cutoff_dt.astimezone(tz).strftime("%a %d %b %H:%M")
     if cancel_type == "early":
         message = (
             "Cancellation request sent to your teacher. "
@@ -1164,7 +1164,7 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     else:
         message = (
             "Cancellation request sent to your teacher. "
-            f"Cancelling within {cutoff_hours} hours ({cutoff_str} in your timezone) = one class deducted."
+            f"You are within {cutoff_hours} hours (cutoff: {cutoff_str} your time) = one class deducted."
         )
     await query.edit_message_text(message)
 
