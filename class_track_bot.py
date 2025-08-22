@@ -1599,9 +1599,9 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     user = query.from_user
     students = load_students()
-    _, student = resolve_student(students, str(user.id))
+    student_key, student = resolve_student(students, str(user.id))
     if not student and user.username:
-        _, student = resolve_student(students, user.username)
+        student_key, student = resolve_student(students, user.username)
     if not student:
         await query.edit_message_text("You are not recognised. Please contact your teacher.")
         return
@@ -1641,12 +1641,12 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(message)
 
     # Notify all admins about the cancellation request
-    student_name = student.get("name", user_id)
+    student_name = student.get("name", student_key)
     class_time_str = selected_dt.strftime("%a %d %b %H:%M")
     cancel_type_readable = "Early" if cancel_type == "early" else "Late"
     admin_message = (
         f"🚨 Cancellation Request: {student_name} wants to cancel {class_time_str}. "
-        f"Type: {cancel_type_readable}. Use /confirmcancel {user_id}"
+        f"Type: {cancel_type_readable}. Use /confirmcancel {student_key}"
     )
     for admin_id in ADMIN_IDS:
         try:
