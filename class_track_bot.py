@@ -719,13 +719,15 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     Usage: /logclass <student_key> [YYYY-MM-DDTHH:MM[:SS]+07:00] [note]
     If no datetime is provided, the bot chooses the nearest class within ±12 hours.
+    If none is found, it logs the most recent past class.
     student_key can be telegram_id or handle as stored in students.json.
     """
     args = context.args
     if not args:
         await update.message.reply_text(
             "Usage: /logclass <student_key> [YYYY-MM-DDTHH:MM[:SS]+07:00] [note]\n"
-            "If no datetime is provided, the bot chooses the nearest class within ±12 hours."
+            "If no datetime is provided, the bot chooses the nearest class within ±12 hours.\n"
+            "If none is found, the most recent past class is logged." 
         )
         return
     student_key = args[0]
@@ -777,15 +779,18 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         now = datetime.now(tz)
         past_candidates: List[datetime] = []
         future_candidates: List[datetime] = []
+        past_all: List[datetime] = []
         for existing in class_dates:
             try:
                 existing_dt = datetime.fromisoformat(existing)
             except Exception:
                 continue
             diff = existing_dt - now
-            if diff <= timedelta(0) and diff >= timedelta(hours=-12):
-                past_candidates.append(existing_dt)
-            elif timedelta(0) < diff <= timedelta(hours=12):
+            if diff <= timedelta(0):
+                past_all.append(existing_dt)
+                if diff >= timedelta(hours=-12):
+                    past_candidates.append(existing_dt)
+            elif diff <= timedelta(hours=12):
                 future_candidates.append(existing_dt)
         if past_candidates:
             selected_dt = max(past_candidates)
@@ -793,9 +798,12 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         elif future_candidates:
             selected_dt = min(future_candidates)
             selected_dt_str = selected_dt.isoformat()
+        elif past_all:
+            selected_dt = max(past_all)
+            selected_dt_str = selected_dt.isoformat()
         else:
             await update.message.reply_text(
-                "No class occurrence found within ±12h. Provide a datetime to force logging: /logclass <student_key> <ISO> [note]."
+                f"No past classes found for {student_key}."
             )
             return
 
@@ -848,9 +856,8 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     save_logs(logs)
 
     local_dt = selected_dt.astimezone(tz) if selected_dt else datetime.now(tz)
-    balance_left = student.get("classes_remaining", 0) + student.get("free_class_credit", 0)
     await update.message.reply_text(
-        f"Logged class for {student['name']} on {local_dt.strftime('%Y-%m-%d %H:%M')}. Balance: {balance_left} left.",
+        f"Logged class on {local_dt.strftime('%Y-%m-%d %H:%M')} for {student_key}.",
         reply_markup=ReplyKeyboardRemove(),
     )
 
