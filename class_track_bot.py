@@ -1381,89 +1381,58 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
-@admin_only
-async def view_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.info("/viewstudent args: %s", context.args)
+async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logging.info("viewstudent command triggered")
+
+    user = update.effective_user
+    if not user or user.id not in ADMIN_IDS:
+        await update.message.reply_text("Not authorized.")
+        return
 
     if not context.args:
-        await update.message.reply_text(
-            "Usage: /viewstudent <student_key>\n"
-            "student_key can be the numeric telegram_id or the @handle you stored."
-        )
+        await update.message.reply_text("Usage: /viewstudent <student_key>")
         return
 
     student_key_input = context.args[0]
+    student_key = student_key_input.lstrip("@")
     students = load_students()
 
     # Direct match
-    student = students.get(student_key_input)
+    student = students.get(student_key) or students.get(student_key_input)
 
     # Try numeric id as string
-    if not student:
-        student = students.get(str(student_key_input))
+    if not student and student_key.isdigit():
+        student = students.get(str(int(student_key)))
 
     # Try handle, normalized
     if not student:
-        sk = student_key_input.lstrip("@").lower()
+        sk = student_key.lower()
         for k, s in students.items():
             handle = (s.get("telegram_handle") or "").lstrip("@").lower()
             if handle == sk:
                 student = s
-                student_key_input = k
+                student_key = k
                 break
 
     if not student:
-        await update.message.reply_text(f"Student '{student_key_input}' not found.")
+        await update.message.reply_text("Student not found.")
         return
 
-    upcoming_list = get_upcoming_classes(student, count=5)
-    lines = [f"Student: {student.get('name', student_key_input)}"]
-    if upcoming_list:
-        lines.append("Upcoming classes:")
-        for dt in upcoming_list:
-            lines.append(f"  - {dt.strftime('%A %d %b %Y at %H:%M')}")
-    else:
-        lines.append("Upcoming classes: None")
-
+    schedule = student.get("class_dates", [])
+    lines = [f"Student: {student.get('name', student_key)}"]
     lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
-    lines.append(f"Renewal date: {student.get('renewal_date', 'N/A')}")
-    if student.get("paused"):
-        lines.append("Status: Paused")
+    if schedule:
+        lines.append("Schedule:")
+        for item in schedule:
+            try:
+                dt = parse_student_datetime(item, student)
+                lines.append(f"  - {dt.strftime('%A %d %b %Y at %H:%M')}")
+            except Exception:
+                lines.append(f"  - {item}")
+    else:
+        lines.append("Schedule: None")
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Show next 10", callback_data=f"viewstudent_more:{student_key_input}:10")],
-        ]
-    )
-
-    await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
-
-
-async def handle_viewstudent_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    try:
-        _, student_key, n_str = query.data.split(":")
-        n = int(n_str)
-    except Exception:
-        await query.edit_message_text("Invalid request.")
-        return
-
-    students = load_students()
-    student = students.get(student_key) or students.get(str(student_key))
-    if not student:
-        await query.edit_message_text(f"Student '{student_key}' not found.")
-        return
-
-    upcoming_list = get_upcoming_classes(student, count=n)
-    if not upcoming_list:
-        await query.edit_message_text("No upcoming classes.")
-        return
-
-    lines = [f"Student: {student.get('name', student_key)} — next {n} classes:"]
-    for dt in upcoming_list:
-        lines.append(f"  - {dt.strftime('%A %d %b %Y at %H:%M')}")
-    await query.edit_message_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines))
 
 
 # -----------------------------------------------------------------------------
@@ -1808,12 +1777,11 @@ def main() -> None:
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
     application.add_handler(CommandHandler("removestudent", remove_student_command))
-    application.add_handler(CommandHandler("viewstudent", view_student_command))
+    application.add_handler(CommandHandler("viewstudent", view_student))
 
     # Student handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:", block=False))
-    application.add_handler(CallbackQueryHandler(handle_viewstudent_more, pattern=r"^viewstudent_more:"))
     application.add_handler(CallbackQueryHandler(student_button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # Ensure schedules extend into the future and reminders are set
