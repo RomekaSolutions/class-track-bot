@@ -437,6 +437,13 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
     tz = student_timezone(student)
     now = datetime.now(tz)
     cancelled = set(student.get("cancelled_dates", []))
+    renewal_date = None
+    renewal_str = student.get("renewal_date")
+    if renewal_str:
+        try:
+            renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
+        except ValueError:
+            renewal_date = None
     results: List[datetime] = []
     for item in student.get("class_dates", []):
         try:
@@ -449,6 +456,8 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
         if dt <= now:
             continue
         if item in cancelled or dt.isoformat() in cancelled:
+            continue
+        if renewal_date and dt.date() >= renewal_date:
             continue
         results.append(dt)
     results.sort()
