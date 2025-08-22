@@ -142,6 +142,55 @@ def parse_student_datetime(dt_str: str, student: Dict[str, Any]) -> datetime:
     return dt
 
 
+def normalize_handle(handle: Optional[str]) -> str:
+    """Return handle lowercased without leading @."""
+    return (handle or "").lstrip("@").lower()
+
+
+def dedupe_student_keys(students: Dict[str, Any]) -> bool:
+    """Normalize handles and merge duplicate records.
+
+    Prefers numeric telegram_id as the dictionary key when available.
+    Returns True if any modifications were made.
+    """
+    changed = False
+    new_students: Dict[str, Any] = {}
+    for key, student in list(students.items()):
+        telegram_id = student.get("telegram_id")
+        handle = normalize_handle(student.get("telegram_handle"))
+        if handle:
+            student["telegram_handle"] = handle
+        canonical_key = str(telegram_id) if telegram_id else handle or normalize_handle(key)
+        existing = new_students.get(canonical_key)
+        if existing is not None:
+            for k, v in student.items():
+                if k not in existing:
+                    existing[k] = v
+            changed = True
+        else:
+            new_students[canonical_key] = student
+        if canonical_key != key:
+            changed = True
+    if changed:
+        students.clear()
+        students.update(new_students)
+    return changed
+
+
+def resolve_student(students: Dict[str, Any], key: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Return (canonical_key, student) for given ID or handle input."""
+    skey = normalize_handle(key)
+    if skey.isdigit() and str(int(skey)) in students:
+        canon = str(int(skey))
+        return canon, students[canon]
+    if skey in students:
+        return skey, students[skey]
+    for k, s in students.items():
+        if normalize_handle(s.get("telegram_handle")) == skey:
+            return k, s
+    return None, None
+
+
 def normalize_students(students: Dict[str, Any]) -> bool:
     """Ensure all student records contain required fields.
 
@@ -261,6 +310,8 @@ def load_students() -> Dict[str, Any]:
             return {}
     changed = normalize_students(students)
     if migrate_student_dates(students):
+        changed = True
+    if dedupe_student_keys(students):
         changed = True
     if changed:
         # One-time migration: persist upgraded student records
@@ -564,14 +615,12 @@ async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def add_handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     handle = update.message.text.strip()
-    # Remove leading @ if present
-    if handle.startswith("@"):  # store as handle for now
-        context.user_data["telegram_handle"] = handle
+    if handle.startswith("@"):  # strip leading @
+        handle = handle[1:]
+    if handle.isdigit():
+        context.user_data["telegram_id"] = int(handle)
     else:
-        try:
-            context.user_data["telegram_id"] = int(handle)
-        except ValueError:
-            context.user_data["telegram_handle"] = handle
+        context.user_data["telegram_handle"] = normalize_handle(handle)
     await update.message.reply_text("Enter the plan price (numerical value, e.g., 3500):")
     return ADD_PRICE
 
@@ -674,7 +723,7 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     # Build student record
     students = load_students()
     telegram_id = context.user_data.get("telegram_id")
-    handle = context.user_data.get("telegram_handle")
+    handle = normalize_handle(context.user_data.get("telegram_handle"))
     key = str(telegram_id) if telegram_id else handle
     if key in students:
         await update.message.reply_text("A student with this identifier already exists. Aborting.")
@@ -730,12 +779,12 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "If none is found, the most recent past class is logged." 
         )
         return
-    student_key = args[0]
+    student_key_input = args[0]
     students = load_students()
-    if student_key not in students:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    student = students[student_key]
 
     # Parse optional datetime argument
     dt_input = None
@@ -873,12 +922,12 @@ async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not args:
         await update.message.reply_text("Usage: /cancelclass <student_key>")
         return
-    student_key = args[0]
+    student_key_input = args[0]
     students = load_students()
-    if student_key not in students:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    student = students[student_key]
     # Award a reschedule credit
     student["reschedule_credit"] = student.get("reschedule_credit", 0) + 1
     save_students(students)
@@ -908,12 +957,12 @@ async def award_free_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not args:
         await update.message.reply_text("Usage: /awardfree <student_key>")
         return
-    student_key = args[0]
+    student_key_input = args[0]
     students = load_students()
-    if student_key not in students:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    student = students[student_key]
     student["free_class_credit"] = student.get("free_class_credit", 0) + 1
     save_students(students)
     logs = load_logs()
@@ -943,7 +992,7 @@ async def renew_student_command(update: Update, context: ContextTypes.DEFAULT_TY
             "Usage: /renewstudent <student_key> <num_classes> <YYYY-MM-DD>"
         )
         return
-    student_key, classes_str, date_str = args
+    student_key_input, classes_str, date_str = args
     try:
         num_classes = int(classes_str)
         if num_classes <= 0:
@@ -956,10 +1005,10 @@ async def renew_student_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Invalid date format. Use YYYY-MM-DD.")
         return
     students = load_students()
-    if student_key not in students:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    student = students[student_key]
     student["classes_remaining"] = student.get("classes_remaining", 0) + num_classes
     student["renewal_date"] = renewal
     # Reset last balance warning upon renewal
@@ -994,12 +1043,12 @@ async def pause_student_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not args:
         await update.message.reply_text("Usage: /pause <student_key>")
         return
-    student_key = args[0]
+    student_key_input = args[0]
     students = load_students()
-    if student_key not in students:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    student = students[student_key]
     student["paused"] = not student.get("paused", False)
     save_students(students)
     state = "paused" if student["paused"] else "resumed"
@@ -1159,12 +1208,12 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     if not args:
         await update.message.reply_text("Usage: /confirmcancel <student_key>")
         return
-    student_key = args[0]
+    student_key_input = args[0]
     students = load_students()
-    if student_key not in students:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    student = students[student_key]
     pending_cancel = student.get("pending_cancel")
     if not pending_cancel:
         await update.message.reply_text("There is no pending cancellation to confirm.")
@@ -1231,13 +1280,12 @@ async def reschedule_student_command(update: Update, context: ContextTypes.DEFAU
         )
         return
 
-    student_key, old_str, new_str = args
+    student_key_input, old_str, new_str = args
     students = load_students()
-    if student_key not in students:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-
-    student = students[student_key]
     try:
         old_dt = parse_student_datetime(old_str, student)
         new_dt = parse_student_datetime(new_str, student)
@@ -1331,26 +1379,26 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    student_key = args[0]
+    student_key_input = args[0]
     confirm = len(args) > 1 and args[1].lower() == "confirm"
     reason = " ".join(args[2:]) if confirm and len(args) > 2 else ""
 
     students = load_students()
-    if student_key not in students:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
 
     if not confirm:
         await update.message.reply_text(
             "Are you sure you want to remove"
-            f" {students[student_key].get('name', student_key)}? "
+            f" {student.get('name', student_key)}? "
             f"Run /removestudent {student_key} confirm [reason] to confirm."
         )
         return
 
-    student = students.get(student_key)
     telegram_id = str(student.get("telegram_id", ""))
-    handle = (student.get("telegram_handle") or "").lstrip("@").lower()
+    handle = normalize_handle(student.get("telegram_handle"))
 
     keys_to_delete = {student_key}
     for k, v in students.items():
@@ -1358,7 +1406,7 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
             continue
         if telegram_id and str(v.get("telegram_id", "")) == telegram_id:
             keys_to_delete.add(k)
-        v_handle = (v.get("telegram_handle") or "").lstrip("@").lower()
+        v_handle = normalize_handle(v.get("telegram_handle"))
         if handle and v_handle and v_handle == handle:
             keys_to_delete.add(k)
 
@@ -1401,26 +1449,8 @@ async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     student_key_input = context.args[0]
-    student_key = student_key_input.lstrip("@")
     students = load_students()
-
-    # Direct match
-    student = students.get(student_key) or students.get(student_key_input)
-
-    # Try numeric id as string
-    if not student and student_key.isdigit():
-        student = students.get(str(int(student_key)))
-
-    # Try handle, normalized
-    if not student:
-        sk = student_key.lower()
-        for k, s in students.items():
-            handle = (s.get("telegram_handle") or "").lstrip("@").lower()
-            if handle == sk:
-                student = s
-                student_key = k
-                break
-
+    student_key, student = resolve_student(students, student_key_input)
     if not student:
         await update.message.reply_text("Student not found.")
         return
@@ -1451,30 +1481,33 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     students = load_students()
     user = update.effective_user
     user_id = str(user.id)
-    # Try lookup by telegram_id
-    student = students.get(user_id)
-    # If not found, attempt to match by handle stored in record
-    if not student:
-        # match by handle if we have one
-        for s in students.values():
-            if s.get("telegram_handle"):
-                # remove leading @ for comparison
-                handle = s["telegram_handle"].lstrip("@").lower()
-                if (user.username or "").lower() == handle:
-                    student = s
-                    # assign telegram_id now for future lookups
-                    s["telegram_id"] = user.id
-                    students[str(user.id)] = s
-                    # remove old handle key if present
-                    # we can't remove because dictionary keyed by id.  We'll keep duplicate to be safe.
-                    break
-        if student:
-            save_students(students)
+    key, student = resolve_student(students, user_id)
+    if not student and user.username:
+        key, student = resolve_student(students, user.username)
     if not student:
         await update.message.reply_text(
             "Hello! You are not registered with this tutoring bot. Please contact your teacher to be added."
         )
         return
+    canonical_key = user_id
+    new_handle = normalize_handle(user.username)
+    if key != canonical_key:
+        students.pop(key, None)
+        students[canonical_key] = student
+        student["telegram_id"] = int(user_id)
+        if new_handle:
+            student["telegram_handle"] = new_handle
+        save_students(students)
+    else:
+        updated = False
+        if student.get("telegram_id") != int(user_id):
+            student["telegram_id"] = int(user_id)
+            updated = True
+        if new_handle and student.get("telegram_handle") != new_handle:
+            student["telegram_handle"] = new_handle
+            updated = True
+        if updated:
+            save_students(students)
     # Build summary message
     upcoming = get_upcoming_classes(student, count=1)
     next_class_str = upcoming[0].strftime("%A %d %b %Y at %H:%M") if upcoming else "No upcoming classes set"
@@ -1503,9 +1536,11 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     """Handle button presses from students (inline keyboard)."""
     query = update.callback_query
     await query.answer()
-    user_id = str(query.from_user.id)
+    user = query.from_user
     students = load_students()
-    student = students.get(user_id)
+    _, student = resolve_student(students, str(user.id))
+    if not student and user.username:
+        _, student = resolve_student(students, user.username)
     if not student:
         await query.edit_message_text("You are not recognised. Please contact your teacher.")
         return
@@ -1562,9 +1597,11 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     """Handle the student's selection of a class to cancel."""
     query = update.callback_query
     await query.answer()
-    user_id = str(query.from_user.id)
+    user = query.from_user
     students = load_students()
-    student = students.get(user_id)
+    _, student = resolve_student(students, str(user.id))
+    if not student and user.username:
+        _, student = resolve_student(students, user.username)
     if not student:
         await query.edit_message_text("You are not recognised. Please contact your teacher.")
         return
