@@ -1363,6 +1363,31 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
+@admin_only
+async def view_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Preview a student's upcoming classes as they would see them."""
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /viewstudent <student_key> [limit]")
+        return
+    student_key = args[0]
+    students = load_students()
+    student = students.get(student_key)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key}' not found.")
+        return
+    limit = 5
+    if len(args) >= 2:
+        try:
+            limit = int(args[1])
+            if limit < 1 or limit > 20:
+                limit = 5
+        except ValueError:
+            limit = 5
+    text = build_student_classes_text(student, limit=limit)
+    await update.message.reply_text(text)
+
+
 # -----------------------------------------------------------------------------
 # Student interface handlers
 # -----------------------------------------------------------------------------
@@ -1441,9 +1466,10 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("Unknown action.")
 
 
-async def show_my_classes(query, student: Dict[str, Any]) -> None:
-    """Display upcoming scheduled classes and remaining credits."""
-    upcoming_list = get_upcoming_classes(student, count=5)
+def build_student_classes_text(student: Dict[str, Any], *, limit: int = 5) -> str:
+    """Return the text shown in a student's "My Classes" view."""
+    limit = max(1, min(20, limit))
+    upcoming_list = get_upcoming_classes(student, count=limit)
     if upcoming_list:
         lines = [f"Upcoming classes for {student['name']}:\n"]
         for dt in upcoming_list:
@@ -1454,7 +1480,13 @@ async def show_my_classes(query, student: Dict[str, Any]) -> None:
     lines.append(f"Renewal date: {student.get('renewal_date', 'N/A')}")
     if student.get("paused"):
         lines.append("Your plan is currently paused.")
-    await query.edit_message_text("\n".join(lines), reply_markup=None)
+    return "\n".join(lines)
+
+
+async def show_my_classes(query, student: Dict[str, Any]) -> None:
+    """Display upcoming scheduled classes and remaining credits."""
+    text = build_student_classes_text(student, limit=5)
+    await query.edit_message_text(text, reply_markup=None)
 
 
 async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
@@ -1696,6 +1728,7 @@ def main() -> None:
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
     application.add_handler(CommandHandler("removestudent", remove_student_command))
+    application.add_handler(CommandHandler("viewstudent", view_student_command))
 
     # Student handlers
     application.add_handler(CommandHandler("start", start_command))
