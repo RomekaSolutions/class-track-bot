@@ -105,23 +105,16 @@ LOGS_FILE = "logs.json"
 DEFAULT_CUTOFF_HOURS = 24
 DEFAULT_CYCLE_WEEKS = 4
 DEFAULT_DURATION_HOURS = 1.0
-DEFAULT_STUDENT_TZ = "Asia/Bangkok"
 # Offset before class time to send reminder
 DEFAULT_REMINDER_OFFSET = timedelta(hours=1)
 
-
-def is_valid_timezone(tz: str) -> bool:
-    """Return True if ``tz`` is a known IANA timezone string."""
-    return tz in pytz.all_timezones
+# Base timezone for all operations (Bangkok time)
+BASE_TZ = pytz.timezone("Asia/Bangkok")
 
 
 def student_timezone(student: Dict[str, Any]) -> pytz.timezone:
-    """Return a pytz timezone for the given student record."""
-    tz_name = student.get("student_timezone", DEFAULT_STUDENT_TZ)
-    try:
-        return pytz.timezone(tz_name)
-    except Exception:
-        return pytz.timezone(DEFAULT_STUDENT_TZ)
+    """Return the base timezone for all students (no per-student TZ)."""
+    return BASE_TZ
 
 
 def safe_localize(tz: pytz.timezone, naive_dt: datetime) -> datetime:
@@ -138,7 +131,7 @@ def safe_localize(tz: pytz.timezone, naive_dt: datetime) -> datetime:
 
 
 def parse_student_datetime(dt_str: str, student: Dict[str, Any]) -> datetime:
-    """Parse ``dt_str`` and return an aware datetime in the student's timezone."""
+    """Parse ``dt_str`` and return an aware datetime in the base timezone."""
     dt_str = dt_str.replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(dt_str)
@@ -167,9 +160,9 @@ def normalize_students(students: Dict[str, Any]) -> bool:
         if "class_duration_hours" not in student:
             student["class_duration_hours"] = DEFAULT_DURATION_HOURS
             changed = True
-        tz = student.get("student_timezone")
-        if not is_valid_timezone(tz if tz else ""):
-            student["student_timezone"] = DEFAULT_STUDENT_TZ
+        # Drop legacy per-student timezone field
+        if "student_timezone" in student:
+            student.pop("student_timezone", None)
             changed = True
         # Remove legacy pending reschedule field if present
         if "pending_reschedule" in student:
@@ -188,7 +181,7 @@ def migrate_student_dates(students: Dict[str, Any]) -> bool:
     """Migrate naive date strings to ISO 8601 with offsets."""
     changed = False
     for student in students.values():
-        tz = student_timezone(student)
+        tz = BASE_TZ
         # class dates
         new_dates = []
         converted = False
@@ -246,9 +239,8 @@ def migrate_student_dates(students: Dict[str, Any]) -> bool:
     ADD_CUTOFF,
     ADD_WEEKS,
     ADD_DURATION,
-    ADD_TIMEZONE,
     ADD_RENEWAL,
-) = range(10)
+) = range(9)
 
 def load_students() -> Dict[str, Any]:
     """Load students from the JSON file and normalize legacy records."""
@@ -305,7 +297,6 @@ def parse_schedule(
     *,
     start_date: Optional[date] = None,
     cycle_weeks: int = DEFAULT_CYCLE_WEEKS,
-    tz_name: str = DEFAULT_STUDENT_TZ,
 ) -> List[str]:
     """Generate concrete class dates for a repeating schedule.
 
@@ -313,12 +304,12 @@ def parse_schedule(
     "Monday 17:00, Thursday 17:00". ``start_date`` marks the beginning of
     the cycle.  For each entry we compute all occurrences within
     ``cycle_weeks`` weeks and return a list of ISO8601 strings with
-    timezone offsets in chronological order. The dates are interpreted in
-    ``tz_name``.
+    timezone offsets in chronological order. All dates are interpreted in
+    the base timezone (ICT).
     """
     if start_date is None:
         start_date = date.today()
-    tz = pytz.timezone(tz_name)
+    tz = BASE_TZ
     entries = [item.strip() for item in schedule_str.split(",") if item.strip()]
     if not entries:
         return []
@@ -385,10 +376,10 @@ def next_occurrence(day_time_str: str, now: datetime) -> datetime:
 
 
 def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[datetime]:
-    """Return upcoming class datetimes in the student's timezone.
+    """Return upcoming class datetimes in the base timezone.
 
     ``student['class_dates']`` stores concrete class datetimes as
-    ISO 8601 strings with timezone offsets in the student's local timezone.
+    ISO 8601 strings with timezone offsets in the base timezone.
     This function converts them to aware ``datetime`` objects, filters out
     past or cancelled classes and returns the next ``count`` items.
     """
@@ -509,7 +500,6 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
                 schedule_pattern,
                 start_date=start_date,
                 cycle_weeks=horizon_weeks,
-                tz_name=tz.zone,
             )
             for dt_str in new_dates:
                 dt = datetime.fromisoformat(dt_str)
@@ -651,22 +641,7 @@ async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     duration = round(duration * 4) / 4
     context.user_data["class_duration_hours"] = duration
     await update.message.reply_text(
-        "Enter IANA timezone (e.g., Asia/Bangkok, Europe/London):"
-    )
-    return ADD_TIMEZONE
-
-
-async def add_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    tz_input = update.message.text.strip()
-    if not is_valid_timezone(tz_input):
-        logging.warning("Invalid timezone input: %s", tz_input)
-        await update.message.reply_text(
-            "Unknown timezone. Examples: Asia/Bangkok, Europe/London. Please enter a valid IANA timezone:"
-        )
-        return ADD_TIMEZONE
-    context.user_data["student_timezone"] = tz_input
-    await update.message.reply_text(
-        "Enter the renewal date (YYYY-MM-DD). This is when the student is expected to renew payment:"
+        "Enter the renewal date (YYYY-MM-DD). This is when the student is expected to renew payment:",
     )
     return ADD_RENEWAL
 
@@ -687,14 +662,12 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("A student with this identifier already exists. Aborting.")
         return ConversationHandler.END
     schedule_pattern = context.user_data.get("schedule_pattern", "")
-    tz_name = context.user_data.get("student_timezone", DEFAULT_STUDENT_TZ)
     cycle_weeks = context.user_data.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
-    start_date = datetime.now(pytz.timezone(tz_name)).date()
+    start_date = datetime.now(BASE_TZ).date()
     class_dates = parse_schedule(
         schedule_pattern,
         start_date=start_date,
         cycle_weeks=cycle_weeks,
-        tz_name=tz_name,
     )
 
     student = {
@@ -709,7 +682,6 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         "cutoff_hours": context.user_data.get("cutoff_hours"),
         "cycle_weeks": cycle_weeks,
         "class_duration_hours": context.user_data.get("class_duration_hours"),
-        "student_timezone": tz_name,
         "paused": False,
         "free_class_credit": 0,
         "reschedule_credit": 0,
@@ -1536,9 +1508,12 @@ async def low_class_warning_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """At the end of the month, send the logs JSON to the admin(s)."""
     bot = context.bot
+    # Only run on the last day of the month (checked by looking at tomorrow's day)
+    today = datetime.now(BASE_TZ).date()
+    if (today + timedelta(days=1)).day != 1:
+        return
     logs = load_logs()
     # Determine current month range
-    today = datetime.now().date()
     month_start = date(today.year, today.month, 1)
     next_month = month_start.replace(day=28) + timedelta(days=4)
     month_end = next_month - timedelta(days=next_month.day)
@@ -1583,7 +1558,7 @@ def main() -> None:
     # If you deploy this bot in a different locale, replace "Asia/Bangkok" with
     # your own timezone, e.g. "UTC" or "America/New_York".  See pytz
     # documentation for valid identifiers.
-    tz = pytz.timezone("Asia/Bangkok")
+    tz = BASE_TZ
     job_queue = JobQueue()
     application: Application = (
         ApplicationBuilder()
@@ -1609,7 +1584,6 @@ def main() -> None:
             ADD_CUTOFF: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_cutoff)],
             ADD_WEEKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_weeks)],
             ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_duration)],
-            ADD_TIMEZONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_timezone)],
             ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
@@ -1644,13 +1618,10 @@ def main() -> None:
     # Job queue for balance warnings and monthly export
     # Low class warnings at 10:00 every day (timezone-aware)
     application.job_queue.run_daily(low_class_warning_job, time=time(hour=10, minute=0, tzinfo=tz))
-    # Monthly export on the last calendar day at 23:00 (timezone-aware)
-    # Use day=1 with last=True to shift to the month's last day
-    application.job_queue.run_monthly(
+    # Monthly export job runs daily at 23:00; it exits early unless it's the last day
+    application.job_queue.run_daily(
         monthly_export_job,
-        when=time(hour=23, minute=0, tzinfo=tz),
-        day=1,
-        last=True,
+        time=time(hour=23, minute=0, tzinfo=tz),
     )
     # Start the bot
     application.run_polling()
