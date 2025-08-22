@@ -699,21 +699,107 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log a completed class for a student.
 
-    Usage: /logclass <student_key> [optional note]
+    Usage: /logclass <student_key> [YYYY-MM-DDTHH:MM[:SS]+07:00] [note]
+    If no datetime is provided, the bot chooses the nearest class within ±12 hours.
     student_key can be telegram_id or handle as stored in students.json.
     """
     args = context.args
     if not args:
-        await update.message.reply_text("Usage: /logclass <student_key> [note]")
+        await update.message.reply_text(
+            "Usage: /logclass <student_key> [YYYY-MM-DDTHH:MM[:SS]+07:00] [note]\n"
+            "If no datetime is provided, the bot chooses the nearest class within ±12 hours."
+        )
         return
     student_key = args[0]
-    note = " ".join(args[1:]) if len(args) > 1 else ""
     students = load_students()
     if student_key not in students:
         await update.message.reply_text(f"Student '{student_key}' not found.")
         return
     student = students[student_key]
-    # Deduct a class.  If they have free class credit, consume that first.
+
+    # Parse optional datetime argument
+    dt_input = None
+    note_start = 1
+    if len(args) >= 2:
+        try:
+            dt_input = parse_student_datetime(args[1], student)
+            note_start = 2
+        except ValueError:
+            dt_input = None
+            note_start = 1
+    note = " ".join(args[note_start:]) if len(args) > note_start else ""
+
+    class_dates = student.get("class_dates", [])
+    tz = student_timezone(student)
+    selected_dt_str: Optional[str] = None
+    selected_dt: Optional[datetime] = None
+
+    if dt_input:
+        dt_str = dt_input.isoformat()
+        if dt_str in class_dates:
+            selected_dt_str = dt_str
+            selected_dt = dt_input
+        else:
+            tolerance = timedelta(minutes=5)
+            for existing in class_dates:
+                try:
+                    existing_dt = datetime.fromisoformat(existing)
+                except Exception:
+                    continue
+                if abs(existing_dt - dt_input) <= tolerance:
+                    selected_dt_str = existing
+                    selected_dt = existing_dt
+                    break
+            if not selected_dt_str:
+                await update.message.reply_text(
+                    "That datetime isn’t in the schedule. Pick a scheduled time or omit the datetime to auto-select one near now."
+                )
+                return
+    else:
+        now = datetime.now(tz)
+        past_candidates: List[datetime] = []
+        future_candidates: List[datetime] = []
+        for existing in class_dates:
+            try:
+                existing_dt = datetime.fromisoformat(existing)
+            except Exception:
+                continue
+            diff = existing_dt - now
+            if diff <= timedelta(0) and diff >= timedelta(hours=-12):
+                past_candidates.append(existing_dt)
+            elif timedelta(0) < diff <= timedelta(hours=12):
+                future_candidates.append(existing_dt)
+        if past_candidates:
+            selected_dt = max(past_candidates)
+            selected_dt_str = selected_dt.isoformat()
+        elif future_candidates:
+            selected_dt = min(future_candidates)
+            selected_dt_str = selected_dt.isoformat()
+        else:
+            await update.message.reply_text(
+                "No class occurrence found within ±12h. Provide a datetime to force logging: /logclass <student_key> <ISO> [note]."
+            )
+            return
+
+    # Remove the class occurrence
+    try:
+        idx = class_dates.index(selected_dt_str)
+        class_dates.pop(idx)
+    except ValueError:
+        await update.message.reply_text("Selected class occurrence not found.")
+        return
+
+    # Defensive cleanup from cancelled_dates
+    cancelled = student.get("cancelled_dates", [])
+    if selected_dt_str in cancelled:
+        cancelled.remove(selected_dt_str)
+
+    # Cancel reminder job for this occurrence
+    for job in context.application.job_queue.jobs():
+        if job.name == f"class_reminder:{student_key}:{selected_dt_str}":
+            job.schedule_removal()
+
+    # Deduct balance
     if student.get("free_class_credit", 0) > 0:
         student["free_class_credit"] -= 1
     else:
@@ -723,22 +809,31 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text(
                 f"Warning: {student['name']} has no classes remaining. Logging anyway."
             )
+
     # After deducting, possibly notify the student about low or zero balance
     await maybe_send_balance_warning(context.bot, student)
     save_students(students)
+
     # Record log
     logs = load_logs()
+    note_text = f"completed: {selected_dt_str}"
+    if note:
+        note_text += f"; {note}"
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
+            "date": datetime.now(tz).strftime("%Y-%m-%d"),
             "status": "completed",
-            "note": note,
+            "note": note_text,
         }
     )
     save_logs(logs)
+
+    local_dt = selected_dt.astimezone(tz) if selected_dt else datetime.now(tz)
+    balance_left = student.get("classes_remaining", 0) + student.get("free_class_credit", 0)
     await update.message.reply_text(
-        f"Logged class for {student['name']}. Note: '{note}'", reply_markup=ReplyKeyboardRemove()
+        f"Logged class for {student['name']} on {local_dt.strftime('%Y-%m-%d %H:%M')}. Balance: {balance_left} left.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 
