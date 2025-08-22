@@ -1073,6 +1073,13 @@ def generate_dashboard_summary() -> str:
     today = now.date()
     month_start = date(now.year, now.month, 1)
 
+    active_students = [s for s in students.values() if not s.get("paused")]
+    total_hours = 0.0
+    for s in active_students:
+        entries = [e for e in s.get("schedule_pattern", "").split(",") if e.strip()]
+        duration = s.get("class_duration_hours", DEFAULT_DURATION_HOURS)
+        total_hours += len(entries) * duration
+
     today_classes: List[str] = []
     low_balance: List[str] = []
     upcoming_renewals: List[str] = []
@@ -1135,6 +1142,9 @@ def generate_dashboard_summary() -> str:
             )
 
     lines: List[str] = ["📊 Dashboard Summary", ""]
+    lines.append(f"Active students: {len(active_students)}")
+    lines.append(f"Total scheduled hours/week: {total_hours:.1f}")
+    lines.append("")
     lines.append(f"Today's classes ({today.isoformat()}):")
     if today_classes:
         lines.extend(f"- {item}" for item in today_classes)
