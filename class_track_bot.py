@@ -1056,31 +1056,22 @@ async def pause_student_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 def generate_dashboard_summary() -> str:
-    """Generate a textual summary for the dashboard command.
+    """Generate a textual summary for the dashboard command."""
 
-    The summary includes today's classes, students approaching a zero
-    balance, paused students, free class credits and statistics about
-    classes this month.
-    """
     students = load_students()
     logs = load_logs()
-    now_admin = datetime.now()
-    today_admin = now_admin.date()
-    month_start = date(now_admin.year, now_admin.month, 1)
+    now = datetime.now()
+    today = now.date()
+    month_start = date(now.year, now.month, 1)
 
     today_classes: List[str] = []
-    two_left: List[str] = []
-    one_left: List[str] = []
-    zero_left: List[str] = []
+    low_balance: List[str] = []
+    upcoming_renewals: List[str] = []
+    overdue_renewals: List[str] = []
     paused_students: List[str] = []
     free_credits: List[str] = []
-    # Stats counters
-    completed = 0
-    missed = 0
-    cancelled = 0
-    rescheduled = 0
+    completed = missed = cancelled = rescheduled = 0
 
-    # Compute simple stats from logs for current month
     for entry in logs:
         entry_date = datetime.strptime(entry["date"], "%Y-%m-%d").date()
         if entry_date < month_start:
@@ -1095,58 +1086,95 @@ def generate_dashboard_summary() -> str:
         elif "rescheduled" in status:
             rescheduled += 1
 
-    for key, student in students.items():
+    for student in students.values():
         tz = student_timezone(student)
-        today_date = datetime.now(tz).date()
-        # Skip further checks for paused students
+        today_student = datetime.now(tz).date()
+
         if student.get("paused"):
             paused_students.append(student["name"])
-            continue
-        # Check upcoming classes for today
-        for dt in get_upcoming_classes(student, count=3):
-            if dt.astimezone(tz).date() == today_date:
-                today_classes.append(f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}")
-                break
-        # Low class warnings
+        else:
+            for dt in get_upcoming_classes(student, count=3):
+                if dt.astimezone(tz).date() == today_student:
+                    today_classes.append(
+                        f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}"
+                    )
+                    break
+
         remaining = student.get("classes_remaining", 0)
-        if remaining == 2:
-            two_left.append(student["name"])
-        elif remaining == 1:
-            one_left.append(student["name"])
-        elif remaining == 0:
-            zero_left.append(student["name"])
-        # Free credits
+        if remaining <= 2:
+            low_balance.append(student["name"])
+
+        renewal_str = student.get("renewal_date")
+        if renewal_str:
+            try:
+                renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
+            except ValueError:
+                renewal_date = None
+            if renewal_date:
+                if renewal_date < today:
+                    overdue_renewals.append(
+                        f"{student['name']} ({renewal_date.isoformat()})"
+                    )
+                elif today <= renewal_date <= today + timedelta(days=7):
+                    upcoming_renewals.append(
+                        f"{student['name']} ({renewal_date.isoformat()})"
+                    )
+
         if student.get("free_class_credit", 0) > 0:
-            free_credits.append(f"{student['name']} ({student['free_class_credit']})")
+            free_credits.append(
+                f"{student['name']} ({student['free_class_credit']})"
+            )
 
-    summary_lines = []
-    summary_lines.append("📊 Dashboard Summary\n")
-    summary_lines.append(f"Today's classes ({today_admin.isoformat()}):")
-    summary_lines.extend([f"  - {item}" for item in (today_classes or ["None"])])
-    summary_lines.append("")
-    summary_lines.append("Students with 2 classes left:")
-    summary_lines.extend([f"  - {item}" for item in (two_left or ["None"])] )
-    summary_lines.append("")
-    summary_lines.append("Students with 1 class left:")
-    summary_lines.extend([f"  - {item}" for item in (one_left or ["None"])] )
-    summary_lines.append("")
-    summary_lines.append("Students with 0 classes left:")
-    summary_lines.extend([f"  - {item}" for item in (zero_left or ["None"])] )
-    summary_lines.append("")
-    summary_lines.append("Paused students:")
-    summary_lines.extend([f"  - {item}" for item in (paused_students or ["None"])] )
-    summary_lines.append("")
-    summary_lines.append("Free class credits:")
-    summary_lines.extend([f"  - {item}" for item in (free_credits or ["None"])] )
-    summary_lines.append("")
-    summary_lines.append("Class statistics (this month):")
-    summary_lines.append(f"  - Completed: {completed}")
-    summary_lines.append(f"  - Missed/late cancels: {missed}")
-    summary_lines.append(f"  - Cancelled: {cancelled}")
-    summary_lines.append(f"  - Rescheduled: {rescheduled}")
+    lines: List[str] = ["📊 Dashboard Summary", ""]
+    lines.append(f"Today's classes ({today.isoformat()}):")
+    if today_classes:
+        lines.extend(f"- {item}" for item in today_classes)
+    else:
+        lines.append("- None")
+    lines.append("")
 
-    summary = "\n".join(summary_lines)
-    return summary
+    lines.append("Students with low class balance:")
+    if low_balance:
+        lines.extend(f"- {item}" for item in low_balance)
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("Upcoming payment renewals (next 7 days):")
+    if upcoming_renewals:
+        lines.extend(f"- {item}" for item in upcoming_renewals)
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("Overdue payment renewals:")
+    if overdue_renewals:
+        lines.extend(f"- {item}" for item in overdue_renewals)
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("Paused students:")
+    if paused_students:
+        lines.extend(f"- {item}" for item in paused_students)
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("Free class credits:")
+    if free_credits:
+        lines.extend(f"- {item}" for item in free_credits)
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("Class statistics (this month):")
+    lines.append(f"- Completed: {completed}")
+    lines.append(f"- Missed/late cancels: {missed}")
+    lines.append(f"- Cancelled: {cancelled}")
+    lines.append(f"- Rescheduled: {rescheduled}")
+
+    return "\n".join(lines)
 
 
 @admin_only
