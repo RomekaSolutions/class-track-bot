@@ -512,14 +512,32 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
 
 
 def admin_only(func):
-    """Decorator to ensure a command is executed by an admin user."""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        if user_id not in ADMIN_IDS:
-            await update.message.reply_text("Sorry, you are not authorized to perform this command.")
-            return
-        return await func(update, context)
+        user = update.effective_user
+        user_id = user.id if user else None
+        logging.info("Command %s called by user_id=%s", func.__name__, user_id)
 
+        if user_id not in ADMIN_IDS:
+            try:
+                if update.message:
+                    await update.message.reply_text("Sorry, you are not authorized to perform this command.")
+                elif update.callback_query:
+                    await update.callback_query.answer("Not authorized.", show_alert=True)
+            except Exception:
+                logging.warning("Unauthorized call with no message/callback context.")
+            return
+
+        try:
+            return await func(update, context)
+        except Exception:
+            logging.exception("Error in admin command %s", func.__name__)
+            try:
+                if update.message:
+                    await update.message.reply_text("Oops, something went wrong running that command.")
+                elif update.callback_query:
+                    await update.callback_query.edit_message_text("Oops, something went wrong running that command.")
+            except Exception:
+                pass
     return wrapper
 
 
@@ -1365,27 +1383,87 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
 
 @admin_only
 async def view_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Preview a student's upcoming classes as they would see them."""
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /viewstudent <student_key> [limit]")
+    logging.info("/viewstudent args: %s", context.args)
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /viewstudent <student_key>\n"
+            "student_key can be the numeric telegram_id or the @handle you stored."
+        )
         return
-    student_key = args[0]
+
+    student_key_input = context.args[0]
     students = load_students()
-    student = students.get(student_key)
+
+    # Direct match
+    student = students.get(student_key_input)
+
+    # Try numeric id as string
     if not student:
-        await update.message.reply_text(f"Student '{student_key}' not found.")
+        student = students.get(str(student_key_input))
+
+    # Try handle, normalized
+    if not student:
+        sk = student_key_input.lstrip("@").lower()
+        for k, s in students.items():
+            handle = (s.get("telegram_handle") or "").lstrip("@").lower()
+            if handle == sk:
+                student = s
+                student_key_input = k
+                break
+
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    limit = 5
-    if len(args) >= 2:
-        try:
-            limit = int(args[1])
-            if limit < 1 or limit > 20:
-                limit = 5
-        except ValueError:
-            limit = 5
-    text = build_student_classes_text(student, limit=limit)
-    await update.message.reply_text(text)
+
+    upcoming_list = get_upcoming_classes(student, count=5)
+    lines = [f"Student: {student.get('name', student_key_input)}"]
+    if upcoming_list:
+        lines.append("Upcoming classes:")
+        for dt in upcoming_list:
+            lines.append(f"  - {dt.strftime('%A %d %b %Y at %H:%M')}")
+    else:
+        lines.append("Upcoming classes: None")
+
+    lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
+    lines.append(f"Renewal date: {student.get('renewal_date', 'N/A')}")
+    if student.get("paused"):
+        lines.append("Status: Paused")
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Show next 10", callback_data=f"viewstudent_more:{student_key_input}:10")],
+        ]
+    )
+
+    await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
+
+
+async def handle_viewstudent_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, student_key, n_str = query.data.split(":")
+        n = int(n_str)
+    except Exception:
+        await query.edit_message_text("Invalid request.")
+        return
+
+    students = load_students()
+    student = students.get(student_key) or students.get(str(student_key))
+    if not student:
+        await query.edit_message_text(f"Student '{student_key}' not found.")
+        return
+
+    upcoming_list = get_upcoming_classes(student, count=n)
+    if not upcoming_list:
+        await query.edit_message_text("No upcoming classes.")
+        return
+
+    lines = [f"Student: {student.get('name', student_key)} — next {n} classes:"]
+    for dt in upcoming_list:
+        lines.append(f"  - {dt.strftime('%A %d %b %Y at %H:%M')}")
+    await query.edit_message_text("\n".join(lines))
 
 
 # -----------------------------------------------------------------------------
@@ -1672,6 +1750,8 @@ def main() -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
     )
 
+    logging.info("ADMIN_IDS loaded: %s", ADMIN_IDS)
+
     if TOKEN == "YOUR_TELEGRAM_BOT_TOKEN_HERE":
         logging.warning("Please set the TELEGRAM_BOT_TOKEN environment variable or edit the TOKEN constant.")
 
@@ -1733,6 +1813,7 @@ def main() -> None:
     # Student handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:", block=False))
+    application.add_handler(CallbackQueryHandler(handle_viewstudent_more, pattern=r"^viewstudent_more:"))
     application.add_handler(CallbackQueryHandler(student_button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # Ensure schedules extend into the future and reminders are set
