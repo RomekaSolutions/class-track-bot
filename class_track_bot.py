@@ -1321,6 +1321,151 @@ async def list_students_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 @admin_only
+async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Entry point for editing a student's schedule or metadata."""
+    students = load_students()
+    buttons: List[List[InlineKeyboardButton]] = []
+    for key, student in students.items():
+        if student.get("paused"):
+            continue
+        name = student.get("name", key)
+        handle = student.get("telegram_handle")
+        label = name
+        if handle:
+            label += f" @{handle}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"edit:pick:{key}")])
+    if not buttons:
+        await update.message.reply_text("No active students found.")
+        return
+    await update.message.reply_text(
+        "Select a student to edit:", reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+@admin_only
+async def edit_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle selection of a student to edit."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) < 3:
+        await query.edit_message_text("Student not found")
+        return
+    student_key_input = parts[2]
+    students = load_students()
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await query.edit_message_text("Student not found")
+        return
+    context.user_data["edit_student_key"] = student_key
+    menu_buttons = [
+        [InlineKeyboardButton("Change weekly day/time", callback_data="edit:option:changetime")],
+        [InlineKeyboardButton("Change class length", callback_data="edit:option:length")],
+        [InlineKeyboardButton("Add weekly class", callback_data="edit:option:addweekly")],
+        [InlineKeyboardButton("Delete weekly class", callback_data="edit:option:delweekly")],
+        [InlineKeyboardButton("Reschedule one class", callback_data="edit:option:reschedule")],
+        [InlineKeyboardButton("Cancel one class", callback_data="edit:option:cancel")],
+        [InlineKeyboardButton("Shift all future times", callback_data="edit:option:shift")],
+        [InlineKeyboardButton("Back", callback_data="edit:back")],
+    ]
+    await query.edit_message_text(
+        f"Editing {student.get('name', student_key)}. Choose an action:",
+        reply_markup=InlineKeyboardMarkup(menu_buttons),
+    )
+
+
+@admin_only
+async def edit_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle menu actions after a student has been chosen."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    action = data.split(":", 2)[2] if ":" in data else ""
+    student_key = context.user_data.get("edit_student_key")
+    students = load_students()
+    student = students.get(student_key) if student_key else None
+    if not student:
+        await query.edit_message_text("Student not found")
+        return
+    if action == "length":
+        duration = student.get("class_duration_hours", DEFAULT_DURATION_HOURS)
+        context.user_data["edit_state"] = "await_length"
+        await query.edit_message_text(
+            f"Current class length: {duration}h. Enter new length (0.5-4.0):"
+        )
+    elif action == "addweekly":
+        context.user_data["edit_state"] = "await_addweekly"
+        await query.edit_message_text("Enter new weekly slot (e.g., 'Tuesday 19:00'):")
+    elif action == "delweekly":
+        pattern = student.get("schedule_pattern", "")
+        entries = [e.strip() for e in pattern.split(",") if e.strip()]
+        if not entries:
+            await query.edit_message_text("No weekly slots to delete.")
+            return
+        buttons = []
+        for idx, entry in enumerate(entries):
+            buttons.append(
+                [InlineKeyboardButton(entry, callback_data=f"edit:delweekly:{student_key}:{idx}")]
+            )
+        await query.edit_message_text(
+            "Select slot to remove:", reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    elif action in {"changetime", "reschedule", "cancel", "shift"}:
+        await query.edit_message_text("This action is not implemented yet.")
+    else:
+        await query.edit_message_text("Unknown action.")
+
+
+@admin_only
+async def edit_delweekly_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Remove a weekly slot from a student's schedule."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 4:
+        await query.edit_message_text("Invalid selection.")
+        return
+    student_key = parts[2]
+    try:
+        index = int(parts[3])
+    except ValueError:
+        await query.edit_message_text("Invalid selection.")
+        return
+    students = load_students()
+    student = students.get(student_key)
+    if not student:
+        await query.edit_message_text("Student not found")
+        return
+    pattern = student.get("schedule_pattern", "")
+    entries = [e.strip() for e in pattern.split(",") if e.strip()]
+    if index < 0 or index >= len(entries):
+        await query.edit_message_text("Invalid selection.")
+        return
+    removed = entries.pop(index)
+    student["schedule_pattern"] = ", ".join(entries)
+    # Regenerate future classes from now
+    start = datetime.now(BASE_TZ).date()
+    cycle_weeks = student.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
+    student["class_dates"] = parse_schedule(
+        student.get("schedule_pattern", ""), start_date=start, cycle_weeks=cycle_weeks
+    )
+    save_students(students)
+    schedule_student_reminders(context.application, student_key, student)
+    logs = load_logs()
+    logs.append(
+        {
+            "student": student_key,
+            "date": datetime.now(BASE_TZ).isoformat(),
+            "status": "pattern_updated",
+            "note": f"removed {removed}",
+            "admin": update.effective_user.id if update.effective_user else None,
+        }
+    )
+    save_logs(logs)
+    await query.edit_message_text(f"Removed weekly slot {removed} for {student['name']}.")
+
+
+@admin_only
 async def download_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generate and send class logs for the specified month."""
     args = context.args
@@ -1912,7 +2057,75 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Catch all handler for plain text messages from students."""
+    """Handle free-form messages for both admins and students."""
+    user_id = update.effective_user.id if update.effective_user else None
+    if user_id in ADMIN_IDS:
+        state = context.user_data.get("edit_state")
+        student_key = context.user_data.get("edit_student_key")
+        if state and student_key:
+            students = load_students()
+            student = students.get(student_key)
+            if not student:
+                await update.message.reply_text("Student not found.")
+                context.user_data.pop("edit_state", None)
+                return
+            if state == "await_length":
+                try:
+                    duration = float(update.message.text.strip())
+                    if duration < 0.5 or duration > 4.0:
+                        raise ValueError
+                except ValueError:
+                    await update.message.reply_text(
+                        "Invalid duration. Enter a number between 0.5 and 4.0:"
+                    )
+                    return
+                duration = round(duration * 4) / 4
+                student["class_duration_hours"] = duration
+                save_students(students)
+                logs = load_logs()
+                logs.append(
+                    {
+                        "student": student_key,
+                        "date": datetime.now(BASE_TZ).isoformat(),
+                        "status": "length_changed",
+                        "note": f"set to {duration}h",
+                        "admin": user_id,
+                    }
+                )
+                save_logs(logs)
+                await update.message.reply_text(
+                    f"Class length updated to {duration}h for {student['name']}."
+                )
+                context.user_data.pop("edit_state", None)
+                return
+            if state == "await_addweekly":
+                slot = update.message.text.strip()
+                pattern = student.get("schedule_pattern", "")
+                pattern = f"{pattern}, {slot}" if pattern else slot
+                student["schedule_pattern"] = pattern
+                start = datetime.now(BASE_TZ).date()
+                cycle_weeks = student.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
+                student["class_dates"] = parse_schedule(
+                    pattern, start_date=start, cycle_weeks=cycle_weeks
+                )
+                save_students(students)
+                schedule_student_reminders(context.application, student_key, student)
+                logs = load_logs()
+                logs.append(
+                    {
+                        "student": student_key,
+                        "date": datetime.now(BASE_TZ).isoformat(),
+                        "status": "pattern_updated",
+                        "note": f"added {slot}",
+                        "admin": user_id,
+                    }
+                )
+                save_logs(logs)
+                await update.message.reply_text(
+                    f"Added weekly class {slot} for {student['name']}."
+                )
+                context.user_data.pop("edit_state", None)
+                return
     await update.message.reply_text(
         "I'm sorry, I didn't understand that. Please use the menu buttons or commands."
     )
@@ -2072,6 +2285,7 @@ def main() -> None:
     application.add_handler(CommandHandler("renewstudent", renew_student_command))
     application.add_handler(CommandHandler("pause", pause_student_command))
     application.add_handler(CommandHandler("liststudents", list_students_command))
+    application.add_handler(CommandHandler("edit", edit_command))
     application.add_handler(CommandHandler("dashboard", dashboard_command))
     application.add_handler(CommandHandler("downloadmonth", download_month_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
@@ -2083,6 +2297,9 @@ def main() -> None:
     # Student handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(dayview_callback, pattern="^dayview:"))
+    application.add_handler(CallbackQueryHandler(edit_pick_callback, pattern="^edit:pick:"))
+    application.add_handler(CallbackQueryHandler(edit_menu_callback, pattern="^edit:option:"))
+    application.add_handler(CallbackQueryHandler(edit_delweekly_callback, pattern="^edit:delweekly:"))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:", block=False))
     application.add_handler(CallbackQueryHandler(student_button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
