@@ -342,3 +342,54 @@ def test_handle_message_edit_states(monkeypatch):
     )
     assert new_dt.isoformat() in student["cancelled_dates"]
     assert student["reschedule_credit"] == 1
+
+
+def test_edit_scope_once_shows_buttons(monkeypatch):
+    tz = ctb.BASE_TZ
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = datetime(2025, 1, 1, 9, 0)
+            return tz.localize(base) if tz else base
+
+    monkeypatch.setattr(ctb, "datetime", FixedDateTime)
+
+    pattern = "Monday 10:00"
+    student = {
+        "name": "A",
+        "schedule_pattern": pattern,
+        "class_dates": ctb.parse_schedule(pattern, start_date=date(2025, 1, 1), cycle_weeks=10),
+        "cycle_weeks": 10,
+    }
+    students = {"1": student}
+    monkeypatch.setattr(ctb, "load_students", lambda: students)
+    monkeypatch.setattr(ctb, "ADMIN_IDS", {1})
+
+    class DummyQuery:
+        def __init__(self):
+            self.data = "edit:time:scope:once:1:0"
+            self.edited = None
+
+        async def answer(self):
+            pass
+
+        async def edit_message_text(self, text, reply_markup=None):
+            self.edited = (text, reply_markup)
+
+    query = DummyQuery()
+    update = types.SimpleNamespace(
+        callback_query=query, effective_user=types.SimpleNamespace(id=1)
+    )
+    asyncio.run(ctb.edit_time_scope_callback(update, types.SimpleNamespace()))
+
+    assert query.edited is not None
+    text, markup = query.edited
+    buttons = markup.inline_keyboard
+    assert text == "Select occurrence to reschedule:"
+    assert len(buttons) == 7  # 6 upcoming dates + Back button
+    for i in range(6):
+        btn = buttons[i][0]
+        expected = student["class_dates"][i]
+        assert btn.text == expected
+        assert btn.callback_data == f"edit:time:oncepick:1:{expected}"
