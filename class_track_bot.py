@@ -542,12 +542,25 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
     tz = student_timezone(student)
     now = datetime.now(tz)
     class_dates = student.get("class_dates", [])
-    parsed = []
+    original_len = len(class_dates)
+
+    renewal_date = None
+    renewal_str = student.get("renewal_date")
+    if renewal_str:
+        try:
+            renewal_date = date.fromisoformat(renewal_str)
+        except ValueError:
+            renewal_date = None
+
+    parsed: List[datetime] = []
     for item in class_dates:
         try:
-            parsed.append(datetime.fromisoformat(item))
+            dt = datetime.fromisoformat(item)
         except Exception:
             continue
+        if renewal_date and dt.date() > renewal_date:
+            continue
+        parsed.append(dt)
     parsed.sort()
     latest = parsed[-1] if parsed else None
     horizon = now + timedelta(weeks=horizon_weeks)
@@ -565,10 +578,13 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
                 dt = datetime.fromisoformat(dt_str)
                 if latest and dt <= latest:
                     continue
-                class_dates.append(dt.isoformat())
+                if renewal_date and dt.date() > renewal_date:
+                    continue
+                parsed.append(dt)
                 added = True
-            class_dates.sort()
-    return added
+    parsed.sort()
+    student["class_dates"] = [dt.isoformat() for dt in parsed]
+    return added or len(student["class_dates"]) != original_len
 
 
 def admin_only(func):
