@@ -781,10 +781,15 @@ def reschedule_single_class(
     else:
         norm = parse_day_time(new_dt_input)
         if norm is None:
-            raise ValueError("Invalid datetime")
-        day_name, time_part = norm.split()
-        target_weekday = WEEKDAY_MAP[day_name.lower()]
-        hour, minute = map(int, time_part.split(":"))
+            try:
+                hour, minute = map(int, new_dt_input.strip().split(":"))
+                target_weekday = old_dt.weekday()
+            except Exception as e:
+                raise ValueError("Invalid datetime") from e
+        else:
+            day_name, time_part = norm.split()
+            target_weekday = WEEKDAY_MAP[day_name.lower()]
+            hour, minute = map(int, time_part.split(":"))
         delta_days = (target_weekday - old_dt.weekday()) % 7
         new_dt = tz.normalize(old_dt + timedelta(days=delta_days))
         new_dt = new_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -1792,13 +1797,11 @@ async def edit_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     context.user_data["edit_student_key"] = student_key
     menu_buttons = [
-        [InlineKeyboardButton("Change weekly day/time", callback_data="edit:option:changetime")],
+        [InlineKeyboardButton("Change class time", callback_data="edit:option:changetime")],
         [InlineKeyboardButton("Change class length", callback_data="edit:option:length")],
         [InlineKeyboardButton("Add weekly class", callback_data="edit:option:addweekly")],
         [InlineKeyboardButton("Delete weekly class", callback_data="edit:option:delweekly")],
-        [InlineKeyboardButton("Reschedule one class", callback_data="edit:option:reschedule")],
         [InlineKeyboardButton("Cancel one class", callback_data="edit:option:cancel")],
-        [InlineKeyboardButton("Adjust start times", callback_data="edit:option:shift")],
         [InlineKeyboardButton("Back", callback_data="edit:back")],
     ]
     await query.edit_message_text(
@@ -1849,29 +1852,19 @@ async def edit_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not entries:
             await query.edit_message_text("No weekly slots to edit.")
             return
-        context.user_data["edit_state"] = "await_changetime"
+        buttons = []
+        for idx, entry in enumerate(entries):
+            buttons.append([
+                InlineKeyboardButton(entry, callback_data=f"edit:time:slot:{student_key}:{idx}")
+            ])
+        buttons.append([InlineKeyboardButton("Back", callback_data=f"edit:pick:{student_key}")])
         await query.edit_message_text(
-            "Enter slot index and new time (e.g., '0 Tuesday 19:00')."
-        )
-    elif action == "reschedule":
-        context.user_data["edit_state"] = "await_reschedule"
-        await query.edit_message_text(
-            "Enter old and new datetimes (e.g., '2025-08-25T17:00+07:00 2025-08-25T19:00+07:00')."
+            "Select slot to change:", reply_markup=InlineKeyboardMarkup(buttons)
         )
     elif action == "cancel":
         context.user_data["edit_state"] = "await_cancel"
         await query.edit_message_text(
             "Enter class datetime to cancel (e.g., '2025-08-25T17:00+07:00')."
-        )
-    elif action == "shift":
-        pattern = student.get("schedule_pattern", "")
-        entries = [e.strip() for e in pattern.split(",") if e.strip()]
-        if not entries:
-            await query.edit_message_text("No weekly slots to shift.")
-            return
-        context.user_data["edit_state"] = "await_shift"
-        await query.edit_message_text(
-            "Enter slot index and offset minutes (e.g., '0 60' for +1h)."
         )
     else:
         await query.edit_message_text("Unknown action.")
@@ -1924,6 +1917,124 @@ async def edit_delweekly_callback(update: Update, context: ContextTypes.DEFAULT_
     )
     save_logs(logs)
     await query.edit_message_text(f"Removed weekly slot {removed} for {student['name']}.")
+
+
+@admin_only
+async def edit_time_slot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Present scope options after picking a slot."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 5:
+        await query.edit_message_text("Invalid selection.")
+        return
+    student_key = parts[3]
+    try:
+        index = int(parts[4])
+    except ValueError:
+        await query.edit_message_text("Invalid selection.")
+        return
+    context.user_data["edit_time_slot_index"] = index
+    buttons = [
+        [
+            InlineKeyboardButton(
+                "Just once",
+                callback_data=f"edit:time:scope:once:{student_key}:{index}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "All future",
+                callback_data=f"edit:time:scope:all:{student_key}:{index}",
+            )
+        ],
+        [InlineKeyboardButton("Back", callback_data="edit:option:changetime")],
+    ]
+    await query.edit_message_text(
+        "Change this slot once or all future?", reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+@admin_only
+async def edit_time_scope_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle scope selection for changing class time."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 6:
+        await query.edit_message_text("Invalid selection.")
+        return
+    scope = parts[3]
+    student_key = parts[4]
+    try:
+        index = int(parts[5])
+    except ValueError:
+        await query.edit_message_text("Invalid selection.")
+        return
+    students = load_students()
+    student = students.get(student_key)
+    if not student:
+        await query.edit_message_text("Student not found")
+        return
+    pattern = student.get("schedule_pattern", "")
+    entries = [e.strip() for e in pattern.split(",") if e.strip()]
+    if index < 0 or index >= len(entries):
+        await query.edit_message_text("Invalid selection.")
+        return
+    if scope == "all":
+        context.user_data["edit_state"] = "await_time_all"
+        context.user_data["edit_slot_index"] = index
+        context.user_data["edit_old_entry"] = entries[index]
+        await query.edit_message_text(
+            "Enter new day and time (e.g., 'Tuesday 19:00')."
+        )
+    elif scope == "once":
+        entry = entries[index]
+        now = datetime.now(BASE_TZ)
+        upcoming = []
+        for dt_str in student.get("class_dates", []):
+            dt = parse_student_datetime(dt_str, student)
+            if dt >= now and dt.strftime("%A %H:%M") == entry:
+                upcoming.append(dt)
+            if len(upcoming) >= 6:
+                break
+        if not upcoming:
+            await query.edit_message_text("No upcoming classes for that slot.")
+            return
+        buttons = []
+        for dt in upcoming:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        dt.strftime("%Y-%m-%d %H:%M"),
+                        callback_data=f"edit:time:oncepick:{student_key}:{dt.isoformat()}",
+                    )
+                ]
+            )
+        buttons.append([InlineKeyboardButton("Back", callback_data="edit:option:changetime")])
+        await query.edit_message_text(
+            "Select occurrence to reschedule:", reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    else:
+        await query.edit_message_text("Invalid selection.")
+
+
+@admin_only
+async def edit_time_oncepick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt for new time after picking a single occurrence."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 4:
+        await query.edit_message_text("Invalid selection.")
+        return
+    student_key = parts[2]
+    old_dt = parts[3]
+    context.user_data["edit_state"] = "await_time_once"
+    context.user_data["edit_once_old_dt"] = old_dt
+    await query.edit_message_text(
+        "Enter new day and time (e.g., 'Tuesday 19:00' or '19:00')."
+    )
 
 
 @admin_only
@@ -2600,21 +2711,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
                 context.user_data.pop("edit_state", None)
                 return
-            if state == "await_changetime":
-                try:
-                    idx_str, new_entry = update.message.text.strip().split(" ", 1)
-                    index = int(idx_str)
-                except ValueError:
-                    await update.message.reply_text(
-                        "Invalid format. Use: <index> <Day HH:MM>"
-                    )
+            if state == "await_time_all":
+                index = context.user_data.get("edit_slot_index")
+                old_entry = context.user_data.get("edit_old_entry")
+                if index is None or old_entry is None:
+                    await update.message.reply_text("No slot selected.")
+                    context.user_data.pop("edit_state", None)
                     return
-                pattern = student.get("schedule_pattern", "")
-                entries = [e.strip() for e in pattern.split(",") if e.strip()]
-                if index < 0 or index >= len(entries):
-                    await update.message.reply_text("Invalid slot index.")
-                    return
-                old_entry = entries[index]
+                new_entry = update.message.text.strip()
                 try:
                     edit_weekly_slot(
                         student_key,
@@ -2642,34 +2746,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
                 save_logs(logs)
                 await update.message.reply_text(
-                    f"Updated slot {index} from {old_entry} → {parse_day_time(new_entry)}."
+                    f"Updated slot {index} from {old_entry} → {parse_day_time(new_entry)}.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Back", callback_data=f"edit:pick:{student_key}")]]
+                    ),
                 )
                 context.user_data.pop("edit_state", None)
+                context.user_data.pop("edit_slot_index", None)
+                context.user_data.pop("edit_old_entry", None)
                 return
-            if state == "await_reschedule":
-                parts = update.message.text.strip().split()
-                if len(parts) != 2:
-                    await update.message.reply_text(
-                        "Invalid format. Provide old and new datetimes."
-                    )
+            if state == "await_time_once":
+                old_dt_str = context.user_data.get("edit_once_old_dt")
+                if not old_dt_str:
+                    await update.message.reply_text("No class selected.")
+                    context.user_data.pop("edit_state", None)
                     return
-                old_dt_str, new_dt_input = parts
+                new_input = update.message.text.strip()
+                old_dt = datetime.fromisoformat(old_dt_str)
+                tz = student_timezone(student)
                 try:
+                    if "T" in new_input:
+                        new_dt = parse_student_datetime(new_input, student)
+                    else:
+                        norm = parse_day_time(new_input)
+                        if norm is None:
+                            hour, minute = map(int, new_input.split(":"))
+                            target_weekday = old_dt.weekday()
+                        else:
+                            day_name, time_part = norm.split()
+                            target_weekday = WEEKDAY_MAP[day_name.lower()]
+                            hour, minute = map(int, time_part.split(":"))
+                        delta = (target_weekday - old_dt.weekday()) % 7
+                        new_dt = tz.normalize(old_dt + timedelta(days=delta))
+                        new_dt = new_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
                     reschedule_single_class(
                         student_key,
                         student,
                         old_dt_str,
-                        new_dt_input,
+                        new_dt.isoformat(),
                         now=datetime.now(BASE_TZ),
                         application=context.application,
                         log=False,
                     )
-                except ValueError:
-                    await update.message.reply_text("Invalid datetime(s).")
+                except Exception:
+                    await update.message.reply_text("Invalid datetime.")
                     return
                 save_students(students)
                 logs = load_logs()
-                new_dt = parse_student_datetime(new_dt_input, student)
                 logs.append(
                     {
                         "student": student_key,
@@ -2681,9 +2804,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
                 save_logs(logs)
                 await update.message.reply_text(
-                    f"Rescheduled class from {old_dt_str} to {new_dt_input}."
+                    f"Rescheduled class from {old_dt_str} to {new_dt.isoformat()}.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Back", callback_data=f"edit:pick:{student_key}")]]
+                    ),
                 )
                 context.user_data.pop("edit_state", None)
+                context.user_data.pop("edit_once_old_dt", None)
                 return
             if state == "await_cancel":
                 dt_input = update.message.text.strip()
@@ -2713,52 +2840,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
                 save_logs(logs)
                 await update.message.reply_text(
-                    f"Cancelled class on {dt.strftime('%d %b %H:%M')}, credit granted."
-                )
-                context.user_data.pop("edit_state", None)
-                return
-            if state == "await_shift":
-                parts = update.message.text.strip().split()
-                if len(parts) != 2:
-                    await update.message.reply_text(
-                        "Invalid format. Use: <index> <minutes>"
-                    )
-                    return
-                try:
-                    index = int(parts[0])
-                    offset = int(parts[1])
-                except ValueError:
-                    await update.message.reply_text(
-                        "Invalid numbers. Use: <index> <minutes>"
-                    )
-                    return
-                try:
-                    bulk_shift_slot(
-                        student_key,
-                        student,
-                        index,
-                        offset_minutes=offset,
-                        now=datetime.now(BASE_TZ),
-                        application=context.application,
-                    )
-                except Exception:
-                    await update.message.reply_text("Failed to shift slot.")
-                    return
-                save_students(students)
-                logs = load_logs()
-                logs.append(
-                    {
-                        "student": student_key,
-                        "date": datetime.now(BASE_TZ).isoformat(),
-                        "status": "slot_shifted",
-                        "note": f"{index} {offset}",
-                        "admin": user_id,
-                    }
-                )
-                save_logs(logs)
-                sign = "+" if offset >= 0 else ""
-                await update.message.reply_text(
-                    f"Shifted slot {index} by {sign}{offset} minutes."
+                    f"Cancelled class on {dt.strftime('%d %b %H:%M')}, credit granted.",
                 )
                 context.user_data.pop("edit_state", None)
                 return
@@ -2936,6 +3018,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_pick_callback, pattern="^edit:pick:"))
     application.add_handler(CallbackQueryHandler(edit_menu_callback, pattern="^edit:option:"))
     application.add_handler(CallbackQueryHandler(edit_delweekly_callback, pattern="^edit:delweekly:"))
+    application.add_handler(CallbackQueryHandler(edit_time_slot_callback, pattern="^edit:time:slot:"))
+    application.add_handler(CallbackQueryHandler(edit_time_scope_callback, pattern="^edit:time:scope:"))
+    application.add_handler(CallbackQueryHandler(edit_time_oncepick_callback, pattern="^edit:time:oncepick:"))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:", block=False))
     application.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern="^admin_cancel_sel:"))
     application.add_handler(CallbackQueryHandler(student_button_handler))

@@ -10,15 +10,25 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 # Patch telegram modules
 telegram_module = types.ModuleType("telegram")
-for name in [
-    "Update",
-    "InlineKeyboardButton",
-    "InlineKeyboardMarkup",
-    "ReplyKeyboardMarkup",
-    "ReplyKeyboardRemove",
-    "KeyboardButton",
+
+class InlineKeyboardButton:
+    def __init__(self, text, callback_data=None):
+        self.text = text
+        self.callback_data = callback_data
+
+class InlineKeyboardMarkup:
+    def __init__(self, keyboard):
+        self.inline_keyboard = keyboard
+
+for name, value in [
+    ("Update", object),
+    ("InlineKeyboardButton", InlineKeyboardButton),
+    ("InlineKeyboardMarkup", InlineKeyboardMarkup),
+    ("ReplyKeyboardMarkup", object),
+    ("ReplyKeyboardRemove", object),
+    ("KeyboardButton", object),
 ]:
-    setattr(telegram_module, name, object)
+    setattr(telegram_module, name, value)
 telegram_ext_module = types.ModuleType("telegram.ext")
 context_types = types.SimpleNamespace(DEFAULT_TYPE=object)
 for name, value in [
@@ -237,7 +247,7 @@ def test_bulk_shift(monkeypatch):
 def make_update(text, user_id=999):
     replies = []
 
-    async def reply(msg):
+    async def reply(msg, reply_markup=None):
         replies.append(msg)
 
     message = types.SimpleNamespace(text=text, reply_text=reply)
@@ -247,7 +257,7 @@ def make_update(text, user_id=999):
     return update, replies
 
 
-async def run_handle(state, text, student, monkeypatch):
+async def run_handle(state, text, student, monkeypatch, extra_user_data=None):
     student_key = "1"
     students = {student_key: student}
     logs = []
@@ -267,10 +277,10 @@ async def run_handle(state, text, student, monkeypatch):
 
     monkeypatch.setattr(ctb, "datetime", FixedDateTime)
 
-    context = types.SimpleNamespace(
-        user_data={"edit_state": state, "edit_student_key": student_key},
-        application=object(),
-    )
+    user_data = {"edit_state": state, "edit_student_key": student_key}
+    if extra_user_data:
+        user_data.update(extra_user_data)
+    context = types.SimpleNamespace(user_data=user_data, application=object())
     update, replies = make_update(text)
     await ctb.handle_message(update, context)
     return students[student_key], logs, replies, context.user_data
@@ -278,7 +288,7 @@ async def run_handle(state, text, student, monkeypatch):
 
 def test_handle_message_edit_states(monkeypatch):
     tz = ctb.BASE_TZ
-    # Change time
+    # Change time (all future)
     pattern = "Monday 18:00"
     student = {
         "name": "A",
@@ -287,16 +297,21 @@ def test_handle_message_edit_states(monkeypatch):
         "cycle_weeks": 4,
     }
     student, logs, replies, user_data = asyncio.run(
-        run_handle("await_changetime", "0 Tuesday 19:00", student, monkeypatch)
+        run_handle(
+            "await_time_all",
+            "Tuesday 19:00",
+            student,
+            monkeypatch,
+            extra_user_data={"edit_slot_index": 0, "edit_old_entry": "Monday 18:00"},
+        )
     )
     assert student["schedule_pattern"] == "Tuesday 19:00"
     assert not user_data.get("edit_state")
     assert any("Updated slot 0" in r for r in replies)
     assert logs and logs[0]["status"] == "pattern_updated"
 
-    # Reschedule
+    # Reschedule once (time only)
     old_dt = tz.localize(datetime(2025, 1, 5, 10, 0))
-    new_dt = tz.localize(datetime(2025, 1, 6, 11, 0))
     student = {
         "class_dates": [old_dt.isoformat()],
         "cancelled_dates": [],
@@ -304,13 +319,16 @@ def test_handle_message_edit_states(monkeypatch):
     }
     student, logs, replies, user_data = asyncio.run(
         run_handle(
-            "await_reschedule",
-            f"{old_dt.isoformat()} {new_dt.isoformat()}",
+            "await_time_once",
+            "12:00",
             student,
             monkeypatch,
+            extra_user_data={"edit_once_old_dt": old_dt.isoformat()},
         )
     )
+    assert any("Rescheduled class" in r for r in replies)
     assert logs and logs[-1]["status"] == "rescheduled"
+    new_dt = datetime.fromisoformat(student["class_dates"][0])
 
     # Cancel
     student = {"class_dates": [new_dt.isoformat()], "cancelled_dates": [], "reschedule_credit": 0}
@@ -324,20 +342,3 @@ def test_handle_message_edit_states(monkeypatch):
     )
     assert new_dt.isoformat() in student["cancelled_dates"]
     assert student["reschedule_credit"] == 1
-
-    # Shift
-    pattern = "Monday 10:00"
-    student = {
-        "schedule_pattern": pattern,
-        "class_dates": ctb.parse_schedule(pattern, start_date=date(2025, 1, 1), cycle_weeks=4),
-        "cycle_weeks": 4,
-    }
-    student, logs, replies, user_data = asyncio.run(
-        run_handle("await_shift", "0 60", student, monkeypatch)
-    )
-    future = [
-        datetime.fromisoformat(d)
-        for d in student["class_dates"]
-        if datetime.fromisoformat(d) > tz.localize(datetime(2025, 1, 1, 0, 0))
-    ]
-    assert all(dt.strftime("%A %H:%M") == "Monday 11:00" for dt in future)
