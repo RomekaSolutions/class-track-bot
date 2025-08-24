@@ -1218,6 +1218,79 @@ def generate_dashboard_summary() -> str:
 
 
 @admin_only
+async def dayview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show inline keyboard with today and the next six days."""
+    now = datetime.now(BASE_TZ)
+    today = now.date()
+    buttons: List[List[InlineKeyboardButton]] = []
+    for i in range(7):
+        target = today + timedelta(days=i)
+        label = f"{target.strftime('%a')} {target.day} {target.strftime('%b')}"
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    label, callback_data=f"dayview:{target.isoformat()}"
+                )
+            ]
+        )
+    await update.message.reply_text(
+        "Select a day:", reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+@admin_only
+async def dayview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle callback for a specific day's class view."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data.split(":", 1)
+    if len(data) != 2:
+        await query.edit_message_text("Invalid day selection.")
+        return
+    try:
+        target_date = datetime.fromisoformat(data[1]).date()
+    except ValueError:
+        await query.edit_message_text("Invalid day selection.")
+        return
+
+    students = load_students()
+    entries: List[Tuple[datetime, str]] = []
+    now = datetime.now(BASE_TZ)
+    for student in students.values():
+        if student.get("paused"):
+            continue
+        cancelled = set(student.get("cancelled_dates", []))
+        renewal_date = None
+        renewal_str = student.get("renewal_date")
+        if renewal_str:
+            try:
+                renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
+            except ValueError:
+                renewal_date = None
+        for item in student.get("class_dates", []):
+            try:
+                dt = parse_student_datetime(item, student).astimezone(BASE_TZ)
+            except Exception:
+                continue
+            if dt.date() != target_date:
+                continue
+            if item in cancelled:
+                continue
+            if renewal_date and dt.date() > renewal_date:
+                continue
+            if target_date == now.date() and dt < now:
+                continue
+            entries.append((dt, student.get("name", "Unknown")))
+    entries.sort(key=lambda x: x[0])
+    if entries:
+        text = "\n".join(f"{dt.strftime('%H:%M')} – {name}" for dt, name in entries)
+    else:
+        label = target_date.strftime("%a %d %b %Y")
+        text = f"No classes for {label}."
+    await query.edit_message_text(text)
+
+
+@admin_only
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display a summary dashboard to the admin."""
     summary = generate_dashboard_summary()
@@ -2005,9 +2078,11 @@ def main() -> None:
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
     application.add_handler(CommandHandler("removestudent", remove_student_command))
     application.add_handler(CommandHandler("viewstudent", view_student))
+    application.add_handler(CommandHandler("dayview", dayview_command))
 
     # Student handlers
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CallbackQueryHandler(dayview_callback, pattern="^dayview:"))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:", block=False))
     application.add_handler(CallbackQueryHandler(student_button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
