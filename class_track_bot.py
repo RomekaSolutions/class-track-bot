@@ -1763,7 +1763,12 @@ async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
         callback = f"cancel_selected:{idx}"
         buttons.append([InlineKeyboardButton(label, callback_data=callback)])
     keyboard = InlineKeyboardMarkup(buttons)
-    await query.edit_message_text("Select a class to cancel:", reply_markup=keyboard)
+    cutoff_hours = student.get("cutoff_hours", DEFAULT_CUTOFF_HOURS)
+    intro = (
+        "Select a class to cancel:\n\n"
+        f"Cancel more than {cutoff_hours} hours before the class to avoid a deduction."
+    )
+    await query.edit_message_text(intro, reply_markup=keyboard)
 
 
 async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
