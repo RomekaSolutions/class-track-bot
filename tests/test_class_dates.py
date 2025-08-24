@@ -73,3 +73,46 @@ def test_no_dates_past_renewal(monkeypatch):
     for item in student["class_dates"]:
         dt = datetime.fromisoformat(item)
         assert dt.date() <= renewal_date
+
+
+def test_get_upcoming_includes_renewal_date(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return tz.localize(cls(2023, 1, 1, 0, 0)) if tz else cls(2023, 1, 1, 0, 0)
+
+    monkeypatch.setattr(ctb, "datetime", FixedDatetime)
+
+    tz = ctb.BASE_TZ
+    student = {
+        "class_dates": [
+            tz.localize(FixedDatetime(2023, 1, 10, 10, 0)).isoformat(),
+            tz.localize(FixedDatetime(2023, 1, 15, 10, 0)).isoformat(),
+            tz.localize(FixedDatetime(2023, 1, 20, 10, 0)).isoformat(),
+        ],
+        "renewal_date": "2023-01-15",
+        "cancelled_dates": [],
+    }
+    upcoming = ctb.get_upcoming_classes(student, count=10)
+    dates = [dt.date() for dt in upcoming]
+    assert dates == [date(2023, 1, 10), date(2023, 1, 15)]
+
+
+def test_build_student_classes_text_includes_renewal_date(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return tz.localize(cls(2023, 1, 1, 0, 0)) if tz else cls(2023, 1, 1, 0, 0)
+
+    monkeypatch.setattr(ctb, "datetime", FixedDatetime)
+
+    tz = ctb.BASE_TZ
+    dt = tz.localize(FixedDatetime(2023, 1, 15, 10, 0))
+    student = {
+        "name": "Alice",
+        "class_dates": [dt.isoformat()],
+        "renewal_date": "2023-01-15",
+        "classes_remaining": 1,
+    }
+    text = ctb.build_student_classes_text(student, limit=5)
+    assert dt.strftime('%A %d %b %Y at %H:%M') in text
