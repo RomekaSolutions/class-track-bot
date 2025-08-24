@@ -1,7 +1,9 @@
 import os
+import os
 import sys
 import types
 import json
+import asyncio
 from datetime import datetime, timedelta, date, tzinfo
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -230,3 +232,112 @@ def test_bulk_shift(monkeypatch):
         if datetime.fromisoformat(d) > now
     ]
     assert all(dt.strftime("%A %H:%M") == "Monday 10:30" for dt in future)
+
+
+def make_update(text, user_id=999):
+    replies = []
+
+    async def reply(msg):
+        replies.append(msg)
+
+    message = types.SimpleNamespace(text=text, reply_text=reply)
+    update = types.SimpleNamespace(
+        effective_user=types.SimpleNamespace(id=user_id), message=message
+    )
+    return update, replies
+
+
+async def run_handle(state, text, student, monkeypatch):
+    student_key = "1"
+    students = {student_key: student}
+    logs = []
+
+    monkeypatch.setattr(ctb, "ADMIN_IDS", {999})
+    monkeypatch.setattr(ctb, "load_students", lambda: students)
+    monkeypatch.setattr(ctb, "save_students", lambda s: students.update(s))
+    monkeypatch.setattr(ctb, "load_logs", lambda: logs)
+    monkeypatch.setattr(ctb, "save_logs", lambda l: logs.extend(l[len(logs):]))
+    monkeypatch.setattr(ctb, "schedule_student_reminders", lambda app, key, s: None)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = datetime(2025, 1, 1, 9, 0)
+            return tz.localize(base) if tz else base
+
+    monkeypatch.setattr(ctb, "datetime", FixedDateTime)
+
+    context = types.SimpleNamespace(
+        user_data={"edit_state": state, "edit_student_key": student_key},
+        application=object(),
+    )
+    update, replies = make_update(text)
+    await ctb.handle_message(update, context)
+    return students[student_key], logs, replies, context.user_data
+
+
+def test_handle_message_edit_states(monkeypatch):
+    tz = ctb.BASE_TZ
+    # Change time
+    pattern = "Monday 18:00"
+    student = {
+        "name": "A",
+        "schedule_pattern": pattern,
+        "class_dates": ctb.parse_schedule(pattern, start_date=date(2025, 1, 1), cycle_weeks=4),
+        "cycle_weeks": 4,
+    }
+    student, logs, replies, user_data = asyncio.run(
+        run_handle("await_changetime", "0 Tuesday 19:00", student, monkeypatch)
+    )
+    assert student["schedule_pattern"] == "Tuesday 19:00"
+    assert not user_data.get("edit_state")
+    assert any("Updated slot 0" in r for r in replies)
+    assert logs and logs[0]["status"] == "pattern_updated"
+
+    # Reschedule
+    old_dt = tz.localize(datetime(2025, 1, 5, 10, 0))
+    new_dt = tz.localize(datetime(2025, 1, 6, 11, 0))
+    student = {
+        "class_dates": [old_dt.isoformat()],
+        "cancelled_dates": [],
+        "renewal_date": "2025-12-31",
+    }
+    student, logs, replies, user_data = asyncio.run(
+        run_handle(
+            "await_reschedule",
+            f"{old_dt.isoformat()} {new_dt.isoformat()}",
+            student,
+            monkeypatch,
+        )
+    )
+    assert logs and logs[-1]["status"] == "rescheduled"
+
+    # Cancel
+    student = {"class_dates": [new_dt.isoformat()], "cancelled_dates": [], "reschedule_credit": 0}
+    student, logs, replies, user_data = asyncio.run(
+        run_handle(
+            "await_cancel",
+            new_dt.isoformat(),
+            student,
+            monkeypatch,
+        )
+    )
+    assert new_dt.isoformat() in student["cancelled_dates"]
+    assert student["reschedule_credit"] == 1
+
+    # Shift
+    pattern = "Monday 10:00"
+    student = {
+        "schedule_pattern": pattern,
+        "class_dates": ctb.parse_schedule(pattern, start_date=date(2025, 1, 1), cycle_weeks=4),
+        "cycle_weeks": 4,
+    }
+    student, logs, replies, user_data = asyncio.run(
+        run_handle("await_shift", "0 60", student, monkeypatch)
+    )
+    future = [
+        datetime.fromisoformat(d)
+        for d in student["class_dates"]
+        if datetime.fromisoformat(d) > tz.localize(datetime(2025, 1, 1, 0, 0))
+    ]
+    assert all(dt.strftime("%A %H:%M") == "Monday 11:00" for dt in future)

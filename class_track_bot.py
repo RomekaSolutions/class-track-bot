@@ -1705,8 +1705,36 @@ async def edit_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(
             "Select slot to remove:", reply_markup=InlineKeyboardMarkup(buttons)
         )
-    elif action in {"changetime", "reschedule", "cancel", "shift"}:
-        await query.edit_message_text("This action is not implemented yet.")
+    elif action == "changetime":
+        pattern = student.get("schedule_pattern", "")
+        entries = [e.strip() for e in pattern.split(",") if e.strip()]
+        if not entries:
+            await query.edit_message_text("No weekly slots to edit.")
+            return
+        context.user_data["edit_state"] = "await_changetime"
+        await query.edit_message_text(
+            "Enter slot index and new time (e.g., '0 Tuesday 19:00')."
+        )
+    elif action == "reschedule":
+        context.user_data["edit_state"] = "await_reschedule"
+        await query.edit_message_text(
+            "Enter old and new datetimes (e.g., '2025-08-25T17:00+07:00 2025-08-25T19:00+07:00')."
+        )
+    elif action == "cancel":
+        context.user_data["edit_state"] = "await_cancel"
+        await query.edit_message_text(
+            "Enter class datetime to cancel (e.g., '2025-08-25T17:00+07:00')."
+        )
+    elif action == "shift":
+        pattern = student.get("schedule_pattern", "")
+        entries = [e.strip() for e in pattern.split(",") if e.strip()]
+        if not entries:
+            await query.edit_message_text("No weekly slots to shift.")
+            return
+        context.user_data["edit_state"] = "await_shift"
+        await query.edit_message_text(
+            "Enter slot index and offset minutes (e.g., '0 60' for +1h)."
+        )
     else:
         await query.edit_message_text("Unknown action.")
 
@@ -2418,6 +2446,168 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 save_logs(logs)
                 await update.message.reply_text(
                     f"Added weekly class {slot} for {student['name']}."
+                )
+                context.user_data.pop("edit_state", None)
+                return
+            if state == "await_changetime":
+                try:
+                    idx_str, new_entry = update.message.text.strip().split(" ", 1)
+                    index = int(idx_str)
+                except ValueError:
+                    await update.message.reply_text(
+                        "Invalid format. Use: <index> <Day HH:MM>"
+                    )
+                    return
+                pattern = student.get("schedule_pattern", "")
+                entries = [e.strip() for e in pattern.split(",") if e.strip()]
+                if index < 0 or index >= len(entries):
+                    await update.message.reply_text("Invalid slot index.")
+                    return
+                old_entry = entries[index]
+                try:
+                    edit_weekly_slot(
+                        student_key,
+                        student,
+                        index,
+                        new_entry,
+                        now=datetime.now(BASE_TZ),
+                        application=context.application,
+                    )
+                except ValueError:
+                    await update.message.reply_text(
+                        "Invalid day/time. Use format like 'Tuesday 19:00'."
+                    )
+                    return
+                save_students(students)
+                logs = load_logs()
+                logs.append(
+                    {
+                        "student": student_key,
+                        "date": datetime.now(BASE_TZ).isoformat(),
+                        "status": "pattern_updated",
+                        "note": f"slot {index} {old_entry}->{parse_day_time(new_entry)}",
+                        "admin": user_id,
+                    }
+                )
+                save_logs(logs)
+                await update.message.reply_text(
+                    f"Updated slot {index} from {old_entry} → {parse_day_time(new_entry)}."
+                )
+                context.user_data.pop("edit_state", None)
+                return
+            if state == "await_reschedule":
+                parts = update.message.text.strip().split()
+                if len(parts) != 2:
+                    await update.message.reply_text(
+                        "Invalid format. Provide old and new datetimes."
+                    )
+                    return
+                old_dt_str, new_dt_input = parts
+                try:
+                    reschedule_single_class(
+                        student_key,
+                        student,
+                        old_dt_str,
+                        new_dt_input,
+                        now=datetime.now(BASE_TZ),
+                        application=context.application,
+                        log=False,
+                    )
+                except ValueError:
+                    await update.message.reply_text("Invalid datetime(s).")
+                    return
+                save_students(students)
+                logs = load_logs()
+                new_dt = parse_student_datetime(new_dt_input, student)
+                logs.append(
+                    {
+                        "student": student_key,
+                        "date": datetime.now(BASE_TZ).isoformat(),
+                        "status": "rescheduled",
+                        "note": f"{old_dt_str} -> {new_dt.isoformat()}",
+                        "admin": user_id,
+                    }
+                )
+                save_logs(logs)
+                await update.message.reply_text(
+                    f"Rescheduled class from {old_dt_str} to {new_dt_input}."
+                )
+                context.user_data.pop("edit_state", None)
+                return
+            if state == "await_cancel":
+                dt_input = update.message.text.strip()
+                try:
+                    dt = parse_student_datetime(dt_input, student)
+                except ValueError:
+                    await update.message.reply_text("Invalid datetime.")
+                    return
+                cancel_single_class(
+                    student_key,
+                    student,
+                    dt.isoformat(),
+                    grant_credit=True,
+                    application=context.application,
+                    log=False,
+                )
+                save_students(students)
+                logs = load_logs()
+                logs.append(
+                    {
+                        "student": student_key,
+                        "date": datetime.now(BASE_TZ).isoformat(),
+                        "status": "cancelled (admin)",
+                        "note": dt.isoformat(),
+                        "admin": user_id,
+                    }
+                )
+                save_logs(logs)
+                await update.message.reply_text(
+                    f"Cancelled class on {dt.strftime('%d %b %H:%M')}, credit granted."
+                )
+                context.user_data.pop("edit_state", None)
+                return
+            if state == "await_shift":
+                parts = update.message.text.strip().split()
+                if len(parts) != 2:
+                    await update.message.reply_text(
+                        "Invalid format. Use: <index> <minutes>"
+                    )
+                    return
+                try:
+                    index = int(parts[0])
+                    offset = int(parts[1])
+                except ValueError:
+                    await update.message.reply_text(
+                        "Invalid numbers. Use: <index> <minutes>"
+                    )
+                    return
+                try:
+                    bulk_shift_slot(
+                        student_key,
+                        student,
+                        index,
+                        offset_minutes=offset,
+                        now=datetime.now(BASE_TZ),
+                        application=context.application,
+                    )
+                except Exception:
+                    await update.message.reply_text("Failed to shift slot.")
+                    return
+                save_students(students)
+                logs = load_logs()
+                logs.append(
+                    {
+                        "student": student_key,
+                        "date": datetime.now(BASE_TZ).isoformat(),
+                        "status": "slot_shifted",
+                        "note": f"{index} {offset}",
+                        "admin": user_id,
+                    }
+                )
+                save_logs(logs)
+                sign = "+" if offset >= 0 else ""
+                await update.message.reply_text(
+                    f"Shifted slot {index} by {sign}{offset} minutes."
                 )
                 context.user_data.pop("edit_state", None)
                 return
