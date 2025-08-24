@@ -2003,11 +2003,12 @@ async def edit_time_scope_callback(update: Update, context: ContextTypes.DEFAULT
             return
         buttons = []
         for dt in upcoming:
+            iso = dt.isoformat()
             buttons.append(
                 [
                     InlineKeyboardButton(
-                        dt.strftime("%Y-%m-%d %H:%M"),
-                        callback_data=f"edit:time:oncepick:{student_key}:{dt.isoformat()}",
+                        iso,
+                        callback_data=f"edit:time:oncepick:{student_key}:{iso}",
                     )
                 ]
             )
