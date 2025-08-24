@@ -111,6 +111,18 @@ DEFAULT_REMINDER_OFFSET = timedelta(hours=1)
 # Base timezone for all operations (Bangkok time)
 BASE_TZ = pytz.timezone("Asia/Bangkok")
 
+# Weekday helpers used throughout scheduling utilities
+WEEKDAY_NAMES = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
+WEEKDAY_MAP = {name.lower(): idx for idx, name in enumerate(WEEKDAY_NAMES)}
+
 
 def student_timezone(student: Dict[str, Any]) -> pytz.timezone:
     """Return the base timezone for all students (no per-student TZ)."""
@@ -394,6 +406,31 @@ def parse_renewal_date(date_str: str) -> Optional[str]:
         return None
 
 
+def parse_day_time(text: str) -> Optional[str]:
+    """Validate and normalize a string like ``"Monday 17:00"``.
+
+    Returns the normalized ``"Day HH:MM"`` form or ``None`` if the
+    input is invalid. Day names are case-insensitive and times must be
+    24-hour ``HH:MM``.
+    """
+    if not isinstance(text, str):
+        return None
+    parts = text.strip().split()
+    if len(parts) != 2:
+        return None
+    day_raw, time_raw = parts
+    weekday_idx = WEEKDAY_MAP.get(day_raw.lower())
+    if weekday_idx is None:
+        return None
+    try:
+        hour, minute = map(int, time_raw.split(":"))
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{WEEKDAY_NAMES[weekday_idx]} {hour:02d}:{minute:02d}"
+
+
 def next_occurrence(day_time_str: str, now: datetime) -> datetime:
     """Given a schedule entry like "Monday 17:00", return the next datetime
     after `now` that matches that weekday and time.
@@ -593,6 +630,264 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
     parsed.sort()
     student["class_dates"] = [dt.isoformat() for dt in parsed]
     return added or len(student["class_dates"]) != original_len
+
+
+def regenerate_future_class_dates(student: Dict[str, Any], *, now: Optional[datetime] = None) -> None:
+    """Regenerate future ``class_dates`` based on ``schedule_pattern``.
+
+    Past class dates are preserved. Future dates are generated from the
+    current ``schedule_pattern`` from ``now`` up to the student's
+    ``renewal_date`` (if any).  ``class_dates`` remain sorted and
+    de-duplicated and cancelled dates are skipped.
+    """
+    tz = student_timezone(student)
+    if now is None:
+        now = datetime.now(tz)
+    pattern = student.get("schedule_pattern", "")
+    entries = [e.strip() for e in pattern.split(",") if e.strip()]
+    past: List[datetime] = []
+    for item in student.get("class_dates", []):
+        try:
+            dt = datetime.fromisoformat(item)
+        except Exception:
+            continue
+        if dt <= now:
+            past.append(dt)
+    renewal_str = student.get("renewal_date")
+    renewal_date = date.fromisoformat(renewal_str) if renewal_str else None
+    horizon_weeks = student.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
+    if renewal_date:
+        diff_weeks = max(0, (renewal_date - now.date()).days // 7 + 1)
+        horizon_weeks = max(horizon_weeks, diff_weeks)
+    future: List[datetime] = []
+    if entries:
+        gen = parse_schedule(
+            ", ".join(entries), start_date=now.date(), cycle_weeks=horizon_weeks
+        )
+        cancelled = set(student.get("cancelled_dates", []))
+        for dt_str in gen:
+            try:
+                dt = datetime.fromisoformat(dt_str)
+            except Exception:
+                continue
+            if dt <= now:
+                continue
+            if renewal_date and dt.date() > renewal_date:
+                continue
+            if dt.isoformat() in cancelled:
+                continue
+            future.append(dt)
+    all_dates = sorted({dt.isoformat() for dt in past + future})
+    student["class_dates"] = all_dates
+
+
+def edit_weekly_slot(
+    student_key: str,
+    student: Dict[str, Any],
+    index: int,
+    new_entry: str,
+    *,
+    now: Optional[datetime] = None,
+    application: Optional[Application] = None,
+) -> None:
+    """Replace one entry in ``schedule_pattern`` and regenerate future dates."""
+    normalized = parse_day_time(new_entry)
+    if normalized is None:
+        raise ValueError("Invalid day/time format")
+    pattern = student.get("schedule_pattern", "")
+    entries = [e.strip() for e in pattern.split(",") if e.strip()]
+    if index < 0 or index >= len(entries):
+        raise IndexError("slot index out of range")
+    entries[index] = normalized
+    student["schedule_pattern"] = ", ".join(entries)
+    regenerate_future_class_dates(student, now=now)
+    if application:
+        schedule_student_reminders(application, student_key, student)
+
+
+def add_weekly_slot(
+    student_key: str,
+    student: Dict[str, Any],
+    entry: str,
+    *,
+    now: Optional[datetime] = None,
+    application: Optional[Application] = None,
+) -> None:
+    """Append a new repeating slot to ``schedule_pattern``."""
+    normalized = parse_day_time(entry)
+    if normalized is None:
+        raise ValueError("Invalid day/time format")
+    pattern = student.get("schedule_pattern", "")
+    entries = [e.strip() for e in pattern.split(",") if e.strip()]
+    if normalized in entries:
+        raise ValueError("Slot already exists")
+    entries.append(normalized)
+    student["schedule_pattern"] = ", ".join(entries)
+    regenerate_future_class_dates(student, now=now)
+    if application:
+        schedule_student_reminders(application, student_key, student)
+
+
+def delete_weekly_slot(
+    student_key: str,
+    student: Dict[str, Any],
+    index: int,
+    *,
+    now: Optional[datetime] = None,
+    application: Optional[Application] = None,
+) -> None:
+    """Remove a slot from ``schedule_pattern`` and drop its future classes."""
+    pattern = student.get("schedule_pattern", "")
+    entries = [e.strip() for e in pattern.split(",") if e.strip()]
+    if index < 0 or index >= len(entries):
+        raise IndexError("slot index out of range")
+    entries.pop(index)
+    student["schedule_pattern"] = ", ".join(entries)
+    regenerate_future_class_dates(student, now=now)
+    if application:
+        schedule_student_reminders(application, student_key, student)
+
+
+def reschedule_single_class(
+    student_key: str,
+    student: Dict[str, Any],
+    old_dt_str: str,
+    new_dt_input: str,
+    *,
+    now: Optional[datetime] = None,
+    application: Optional[Application] = None,
+    log: bool = True,
+) -> None:
+    """Move one upcoming class to a new datetime."""
+    tz = student_timezone(student)
+    if now is None:
+        now = datetime.now(tz)
+    try:
+        old_dt = datetime.fromisoformat(old_dt_str)
+    except Exception as e:
+        raise ValueError("Invalid old datetime") from e
+    if "T" in new_dt_input:
+        new_dt = parse_student_datetime(new_dt_input, student)
+    else:
+        norm = parse_day_time(new_dt_input)
+        if norm is None:
+            raise ValueError("Invalid datetime")
+        day_name, time_part = norm.split()
+        target_weekday = WEEKDAY_MAP[day_name.lower()]
+        hour, minute = map(int, time_part.split(":"))
+        delta_days = (target_weekday - old_dt.weekday()) % 7
+        new_dt = tz.normalize(old_dt + timedelta(days=delta_days))
+        new_dt = new_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if new_dt <= now:
+        raise ValueError("Cannot reschedule into the past")
+    renewal_str = student.get("renewal_date")
+    if renewal_str:
+        renewal_date = date.fromisoformat(renewal_str)
+        if new_dt.date() > renewal_date:
+            raise ValueError("Beyond renewal date")
+    class_dates = [datetime.fromisoformat(x) for x in student.get("class_dates", [])]
+    try:
+        class_dates.remove(old_dt)
+    except ValueError:
+        raise ValueError("Old datetime not found")
+    if new_dt not in class_dates:
+        class_dates.append(new_dt)
+    class_dates.sort()
+    student["class_dates"] = [dt.isoformat() for dt in class_dates]
+    cancelled = student.get("cancelled_dates", [])
+    if new_dt.isoformat() in cancelled:
+        cancelled.remove(new_dt.isoformat())
+    student["cancelled_dates"] = cancelled
+    if application:
+        schedule_student_reminders(application, student_key, student)
+    if log:
+        logs = load_logs()
+        logs.append(
+            {
+                "student": student_key,
+                "date": now.isoformat(),
+                "status": "rescheduled",
+                "note": f"to {new_dt.isoformat()}",
+            }
+        )
+        save_logs(logs)
+
+
+def cancel_single_class(
+    student_key: str,
+    student: Dict[str, Any],
+    dt_str: str,
+    *,
+    grant_credit: bool = False,
+    application: Optional[Application] = None,
+    log: bool = True,
+) -> None:
+    """Mark one upcoming class as cancelled."""
+    cancelled = student.setdefault("cancelled_dates", [])
+    if dt_str not in cancelled:
+        cancelled.append(dt_str)
+    if grant_credit:
+        student["reschedule_credit"] = student.get("reschedule_credit", 0) + 1
+    if application:
+        schedule_student_reminders(application, student_key, student)
+    if log:
+        logs = load_logs()
+        logs.append(
+            {
+                "student": student_key,
+                "date": datetime.now(BASE_TZ).isoformat(),
+                "status": "cancelled (admin)",
+                "note": dt_str,
+            }
+        )
+        save_logs(logs)
+
+
+def bulk_shift_slot(
+    student_key: str,
+    student: Dict[str, Any],
+    index: int,
+    *,
+    new_entry: Optional[str] = None,
+    offset_minutes: int = 0,
+    now: Optional[datetime] = None,
+    application: Optional[Application] = None,
+) -> None:
+    """Shift all future occurrences of one slot."""
+    tz = student_timezone(student)
+    if now is None:
+        now = datetime.now(tz)
+    pattern = student.get("schedule_pattern", "")
+    entries = [e.strip() for e in pattern.split(",") if e.strip()]
+    if index < 0 or index >= len(entries):
+        raise IndexError("slot index out of range")
+    old_entry = entries[index]
+    if new_entry is not None:
+        normalized = parse_day_time(new_entry)
+        if normalized is None:
+            raise ValueError("Invalid day/time format")
+        entries[index] = normalized
+        student["schedule_pattern"] = ", ".join(entries)
+        regenerate_future_class_dates(student, now=now)
+    else:
+        delta = timedelta(minutes=offset_minutes)
+        class_dates: List[datetime] = []
+        for item in student.get("class_dates", []):
+            try:
+                dt = datetime.fromisoformat(item)
+            except Exception:
+                continue
+            if dt > now and dt.strftime("%A %H:%M") == old_entry:
+                new_dt = tz.normalize(dt + delta)
+                if new_dt > now:
+                    class_dates.append(new_dt)
+                # else drop past ones
+            else:
+                class_dates.append(dt)
+        class_dates = sorted({dt.isoformat() for dt in class_dates})
+        student["class_dates"] = class_dates
+    if application:
+        schedule_student_reminders(application, student_key, student)
 
 
 def admin_only(func):
