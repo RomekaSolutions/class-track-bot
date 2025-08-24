@@ -698,8 +698,14 @@ def edit_weekly_slot(
     entries = [e.strip() for e in pattern.split(",") if e.strip()]
     if index < 0 or index >= len(entries):
         raise IndexError("slot index out of range")
+    old_entry = entries[index]
     entries[index] = normalized
     student["schedule_pattern"] = ", ".join(entries)
+    # maintain slot-specific durations
+    durations = student.get("slot_durations")
+    if durations and old_entry in durations:
+        durations[normalized] = durations.pop(old_entry)
+        student["slot_durations"] = durations
     regenerate_future_class_dates(student, now=now)
     if application:
         schedule_student_reminders(application, student_key, student)
@@ -741,8 +747,12 @@ def delete_weekly_slot(
     entries = [e.strip() for e in pattern.split(",") if e.strip()]
     if index < 0 or index >= len(entries):
         raise IndexError("slot index out of range")
-    entries.pop(index)
+    removed = entries.pop(index)
     student["schedule_pattern"] = ", ".join(entries)
+    durations = student.get("slot_durations")
+    if durations and removed in durations:
+        durations.pop(removed, None)
+        student["slot_durations"] = durations
     regenerate_future_class_dates(student, now=now)
     if application:
         schedule_student_reminders(application, student_key, student)
@@ -843,6 +853,16 @@ def cancel_single_class(
         save_logs(logs)
 
 
+def set_class_length(student: Dict[str, Any], duration_hours: float, slot: Optional[str] = None) -> None:
+    """Update class duration globally or for a specific weekly slot."""
+    duration_hours = round(duration_hours * 4) / 4
+    if slot:
+        durations = student.setdefault("slot_durations", {})
+        durations[slot] = duration_hours
+        student["slot_durations"] = durations
+    else:
+        student["class_duration_hours"] = duration_hours
+
 def bulk_shift_slot(
     student_key: str,
     student: Dict[str, Any],
@@ -868,6 +888,10 @@ def bulk_shift_slot(
             raise ValueError("Invalid day/time format")
         entries[index] = normalized
         student["schedule_pattern"] = ", ".join(entries)
+        durations = student.get("slot_durations")
+        if durations and old_entry in durations:
+            durations[normalized] = durations.pop(old_entry)
+            student["slot_durations"] = durations
         regenerate_future_class_dates(student, now=now)
     else:
         delta = timedelta(minutes=offset_minutes)
@@ -1237,7 +1261,7 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 @admin_only
-async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _cancel_class_command_legacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Cancel a class from the admin side.
 
     Usage: /cancelclass <student_key>
@@ -1270,6 +1294,120 @@ async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(
         f"Cancelled a class for {student['name']}. They now have {student['reschedule_credit']} reschedule credit(s)."
     )
+
+
+@admin_only
+async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start admin-driven cancellation for a student's upcoming class.
+
+    Usage: /cancelclass <student_key> [--late] [--note "..."]
+    Default behaviour grants a reschedule credit. Use --late to deduct instead.
+    """
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /cancelclass <student_key> [--late] [--note \"...\"]"
+        )
+        return
+    late = False
+    note = ""
+    student_key_input = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--late":
+            late = True
+            i += 1
+        elif args[i] == "--note":
+            note = " ".join(args[i + 1 :])
+            break
+        elif student_key_input is None:
+            student_key_input = args[i]
+            i += 1
+        else:
+            i += 1
+    if not student_key_input:
+        await update.message.reply_text("Student key required.")
+        return
+    students = load_students()
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
+        return
+    upcoming_list = get_upcoming_classes(student, count=8)
+    if not upcoming_list:
+        await update.message.reply_text("No upcoming classes to cancel.")
+        return
+    context.user_data["admin_cancel"] = {
+        "student_key": student_key,
+        "late": late,
+        "note": note,
+    }
+    buttons = []
+    for idx, dt in enumerate(upcoming_list):
+        label = dt.strftime("%a %d %b %H:%M")
+        buttons.append(
+            [InlineKeyboardButton(label, callback_data=f"admin_cancel_sel:{idx}")]
+        )
+    await update.message.reply_text(
+        "Select class to cancel:", reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+@admin_only
+async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle selection of class to cancel from admin command."""
+    query = update.callback_query
+    await query.answer()
+    info = context.user_data.get("admin_cancel")
+    if not info:
+        await query.edit_message_text("No pending cancellation.")
+        return
+    students = load_students()
+    student_key = info.get("student_key")
+    student = students.get(student_key)
+    if not student:
+        await query.edit_message_text("Student not found.")
+        return
+    try:
+        index = int(query.data.split(":")[1])
+    except Exception:
+        await query.edit_message_text("Invalid selection.")
+        return
+    upcoming_list = get_upcoming_classes(student, count=8)
+    if index < 0 or index >= len(upcoming_list):
+        await query.edit_message_text("Invalid selection.")
+        return
+    dt = upcoming_list[index]
+    grant_credit = not info.get("late")
+    cancel_single_class(
+        student_key,
+        student,
+        dt.isoformat(),
+        grant_credit=grant_credit,
+        application=context.application,
+        log=False,
+    )
+    if not grant_credit and student.get("classes_remaining", 0) > 0:
+        student["classes_remaining"] -= 1
+        await maybe_send_balance_warning(context.bot, student)
+    save_students(students)
+    logs = load_logs()
+    logs.append(
+        {
+            "student": student_key,
+            "date": datetime.now(student_timezone(student)).isoformat(),
+            "status": "cancelled_late" if info.get("late") else "cancelled",
+            "note": info.get("note", ""),
+        }
+    )
+    save_logs(logs)
+    msg = (
+        f"Cancelled {dt.strftime('%d %b %H:%M')}, reschedule credit granted."
+        if grant_credit
+        else f"Cancelled {dt.strftime('%d %b %H:%M')}, one class deducted."
+    )
+    await query.edit_message_text(msg)
+    context.user_data.pop("admin_cancel", None)
 
 
 @admin_only
@@ -1660,7 +1798,7 @@ async def edit_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("Delete weekly class", callback_data="edit:option:delweekly")],
         [InlineKeyboardButton("Reschedule one class", callback_data="edit:option:reschedule")],
         [InlineKeyboardButton("Cancel one class", callback_data="edit:option:cancel")],
-        [InlineKeyboardButton("Shift all future times", callback_data="edit:option:shift")],
+        [InlineKeyboardButton("Adjust start times", callback_data="edit:option:shift")],
         [InlineKeyboardButton("Back", callback_data="edit:back")],
     ]
     await query.edit_message_text(
@@ -2139,6 +2277,32 @@ async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # Student interface handlers
 # -----------------------------------------------------------------------------
 
+
+def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
+    """Return the welcome text and keyboard for a student."""
+    upcoming = get_upcoming_classes(student, count=1)
+    next_class_str = (
+        upcoming[0].strftime("%A %d %b %Y at %H:%M") if upcoming else "No upcoming classes set"
+    )
+    classes_remaining = student.get("classes_remaining", 0)
+    renewal = student.get("renewal_date", "N/A")
+    lines = [
+        f"Hello, {student['name']}!",
+        f"Your next class: {next_class_str}",
+        f"Classes remaining: {classes_remaining}",
+        f"Plan renews on: {renewal}",
+    ]
+    if student.get("paused"):
+        lines.append("Your plan is currently paused. Contact your teacher to resume.")
+    buttons = [
+        [InlineKeyboardButton("📅 My Classes", callback_data="my_classes")],
+        [InlineKeyboardButton("❌ Cancel Class", callback_data="cancel_class")],
+    ]
+    if student.get("free_class_credit", 0) > 0:
+        buttons.append([InlineKeyboardButton("🎁 Free Class Credit", callback_data="free_credit")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start for students.  Show upcoming class, remaining credits and renewal date."""
     students = load_students()
@@ -2171,28 +2335,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             updated = True
         if updated:
             save_students(students)
-    # Build summary message
-    upcoming = get_upcoming_classes(student, count=1)
-    next_class_str = upcoming[0].strftime("%A %d %b %Y at %H:%M") if upcoming else "No upcoming classes set"
-    classes_remaining = student.get("classes_remaining", 0)
-    renewal = student.get("renewal_date", "N/A")
-    message_lines = [
-        f"Hello, {student['name']}!",
-        f"Your next class: {next_class_str}",
-        f"Classes remaining: {classes_remaining}",
-        f"Plan renews on: {renewal}",
-    ]
-    if student.get("paused"):
-        message_lines.append("Your plan is currently paused. Contact your teacher to resume.")
-    # Build keyboard
-    buttons = []
-    buttons.append([InlineKeyboardButton("📅 My Classes", callback_data="my_classes")])
-    buttons.append([InlineKeyboardButton("❌ Cancel Class", callback_data="cancel_class")])
-    # Show free class credit info if available
-    if student.get("free_class_credit", 0) > 0:
-        buttons.append([InlineKeyboardButton("🎁 Free Class Credit", callback_data="free_credit")])
-    reply_markup = InlineKeyboardMarkup(buttons)
-    await update.message.reply_text("\n".join(message_lines), reply_markup=reply_markup)
+    text, markup = build_start_message(student)
+    await update.message.reply_text(text, reply_markup=markup)
 
 
 async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2208,12 +2352,16 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("You are not recognised. Please contact your teacher.")
         return
     data = query.data
+    logging.info("student_button_handler: user=%s data=%s", user.id, data)
     if data == "my_classes":
         await show_my_classes(query, student_key, student)
     elif data == "cancel_class":
         await initiate_cancel_class(query, student)
     elif data == "free_credit":
         await show_free_credit(query, student)
+    elif data == "back_to_start":
+        text, markup = build_start_message(student)
+        await query.message.reply_text(text, reply_markup=markup)
     else:
         await query.edit_message_text("Unknown action.")
 
@@ -2289,7 +2437,10 @@ async def show_my_classes(
 ) -> None:
     """Display upcoming scheduled classes and remaining credits."""
     text = build_student_classes_text(student, limit=5, student_key=student_key)
-    await query.edit_message_text(text, reply_markup=None)
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")]]
+    )
+    await query.edit_message_text(text, reply_markup=keyboard)
 
 
 async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
@@ -2786,6 +2937,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_menu_callback, pattern="^edit:option:"))
     application.add_handler(CallbackQueryHandler(edit_delweekly_callback, pattern="^edit:delweekly:"))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:", block=False))
+    application.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern="^admin_cancel_sel:"))
     application.add_handler(CallbackQueryHandler(student_button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # Ensure schedules extend into the future and reminders are set
