@@ -4,6 +4,7 @@ A Telegram bot to manage ESL class schedules, payments, cancellations, and stude
 ## Admin Commands
 
 - `/renewstudent <student_key> <num_classes> <YYYY-MM-DD>` – top up a student's class balance and set a new renewal date while preserving their schedule.
+- `/liststudents` – show all active students with their Telegram handles or IDs.
 
 ### Student identifiers
 

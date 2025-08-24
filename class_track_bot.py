@@ -1225,6 +1225,29 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 @admin_only
+async def list_students_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List all active students with their handles."""
+    students = load_students()
+    active = [s for s in students.values() if not s.get("paused")]
+    if not active:
+        await update.message.reply_text("No active students found.")
+        return
+
+    lines = ["Active students:"]
+    for s in sorted(active, key=lambda x: x.get("name", "").lower()):
+        handle = s.get("telegram_handle")
+        if handle:
+            ident = f"@{handle}"
+        elif s.get("telegram_id"):
+            ident = f"id {s['telegram_id']}"
+        else:
+            ident = "no handle"
+        lines.append(f"- {s['name']} ({ident})")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+@admin_only
 async def download_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generate and send class logs for the specified month."""
     args = context.args
@@ -1947,6 +1970,7 @@ def main() -> None:
     application.add_handler(CommandHandler("awardfree", award_free_command))
     application.add_handler(CommandHandler("renewstudent", renew_student_command))
     application.add_handler(CommandHandler("pause", pause_student_command))
+    application.add_handler(CommandHandler("liststudents", list_students_command))
     application.add_handler(CommandHandler("dashboard", dashboard_command))
     application.add_handler(CommandHandler("downloadmonth", download_month_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
