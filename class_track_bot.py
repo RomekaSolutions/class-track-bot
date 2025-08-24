@@ -1458,19 +1458,28 @@ async def reschedule_student_command(update: Update, context: ContextTypes.DEFAU
 async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Remove a student record and cancel scheduled reminders.
 
-    Usage: /removestudent <student_key> confirm [reason]
+    Usage: /removestudent <student_key> confirm [purge] [reason]
     Run once to prompt confirmation, then repeat with ``confirm`` to finalize.
+    Include ``purge`` after ``confirm`` to also delete other records sharing the
+    same Telegram ID or handle.
     """
     args = context.args
     if not args:
         await update.message.reply_text(
-            "Usage: /removestudent <student_key> confirm [reason]"
+            "Usage: /removestudent <student_key> confirm [purge] [reason]"
         )
         return
 
     student_key_input = args[0]
     confirm = len(args) > 1 and args[1].lower() == "confirm"
-    reason = " ".join(args[2:]) if confirm and len(args) > 2 else ""
+    purge = False
+    reason = ""
+    if confirm:
+        remaining = list(args[2:])
+        if remaining and remaining[0].lower() == "purge":
+            purge = True
+            remaining = remaining[1:]
+        reason = " ".join(remaining) if remaining else ""
 
     students = load_students()
     student_key, student = resolve_student(students, student_key_input)
@@ -1482,22 +1491,27 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(
             "Are you sure you want to remove"
             f" {student.get('name', student_key)}? "
-            f"Run /removestudent {student_key} confirm [reason] to confirm."
+            f"Run /removestudent {student_key} confirm [purge] [reason] to confirm."
         )
         return
 
     telegram_id = str(student.get("telegram_id", ""))
     handle = normalize_handle(student.get("telegram_handle"))
 
-    keys_to_delete = {student_key}
+    duplicates = set()
     for k, v in students.items():
         if k == student_key:
             continue
         if telegram_id and str(v.get("telegram_id", "")) == telegram_id:
-            keys_to_delete.add(k)
+            duplicates.add(k)
+            continue
         v_handle = normalize_handle(v.get("telegram_handle"))
         if handle and v_handle and v_handle == handle:
-            keys_to_delete.add(k)
+            duplicates.add(k)
+
+    keys_to_delete = {student_key}
+    if purge:
+        keys_to_delete.update(duplicates)
 
     for key in keys_to_delete:
         students.pop(key, None)
@@ -1520,9 +1534,18 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
     )
     save_logs(logs)
 
-    await update.message.reply_text(
-        f"Removed {student.get('name', student_key)} from records."
-    )
+    msg = f"Removed {student.get('name', student_key)} from records."
+    if duplicates and not purge:
+        msg += (
+            f" {len(duplicates)} other record(s) share this contact. "
+            f"Run /removestudent {student_key} confirm purge to remove them."
+        )
+    elif duplicates and purge:
+        msg = (
+            f"Removed {student.get('name', student_key)} and {len(duplicates)} "
+            "duplicate record(s)."
+        )
+    await update.message.reply_text(msg)
 
 
 async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
