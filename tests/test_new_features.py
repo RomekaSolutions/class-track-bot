@@ -96,6 +96,11 @@ def test_reschedule_and_cancel_single_class(monkeypatch):
     assert old_dt.isoformat() not in student["class_dates"]
     assert new_dt.isoformat() in student["class_dates"]
     assert calls == ["1"]
+    # time-only reschedule
+    another_old = tz.localize(datetime(2025, 1, 8, 10, 0))
+    student["class_dates"] = [another_old.isoformat()]
+    ctb.reschedule_single_class("1", student, another_old.isoformat(), "12:30", now=now, application=object(), log=False)
+    assert any("12:30" in d for d in student["class_dates"])
     # cancel early
     student["classes_remaining"] = 2
     ctb.cancel_single_class("1", student, new_dt.isoformat(), grant_credit=True, application=object(), log=False)
