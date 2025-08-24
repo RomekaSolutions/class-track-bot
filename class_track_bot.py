@@ -343,6 +343,14 @@ def save_logs(logs: List[Dict[str, Any]]) -> None:
         json.dump(logs, f, indent=2, ensure_ascii=False, sort_keys=True)
 
 
+def parse_log_date(date_str: str) -> date:
+    """Return a date object from an ISO date or datetime string."""
+    try:
+        return datetime.fromisoformat(date_str).date()
+    except ValueError:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+
+
 def parse_schedule(
     schedule_str: str,
     *,
@@ -916,15 +924,12 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Record log
     logs = load_logs()
-    note_text = f"completed: {selected_dt_str}"
-    if note:
-        note_text += f"; {note}"
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(tz).strftime("%Y-%m-%d"),
+            "date": selected_dt_str or datetime.now(tz).isoformat(),
             "status": "completed",
-            "note": note_text,
+            "note": note or "",
         }
     )
     save_logs(logs)
@@ -961,9 +966,9 @@ async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYP
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
-            "status": "cancelled_by_admin",
-            "note": "",
+            "date": datetime.now(student_timezone(student)).isoformat(),
+            "status": "cancelled",
+            "note": "admin cancel",
         }
     )
     save_logs(logs)
@@ -994,9 +999,9 @@ async def award_free_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
+            "date": datetime.now(student_timezone(student)).isoformat(),
             "status": "free_credit_awarded",
-            "note": "",
+            "note": "admin award free credit",
         }
     )
     save_logs(logs)
@@ -1105,7 +1110,7 @@ def generate_dashboard_summary() -> str:
     completed = missed = cancelled = rescheduled = 0
 
     for entry in logs:
-        entry_date = datetime.strptime(entry["date"], "%Y-%m-%d").date()
+        entry_date = parse_log_date(entry["date"])
         if entry_date < month_start:
             continue
         status = entry.get("status", "")
@@ -1238,9 +1243,7 @@ async def download_month_command(update: Update, context: ContextTypes.DEFAULT_T
     month_logs = [
         entry
         for entry in logs
-        if month_start
-        <= datetime.strptime(entry["date"], "%Y-%m-%d").date()
-        <= month_end
+        if month_start <= parse_log_date(entry["date"]) <= month_end
     ]
     filename = f"class_logs_{month_start.strftime('%Y_%m')}.json"
     try:
@@ -1317,9 +1320,9 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
+            "date": class_time_str,
             "status": log_status,
-            "note": "",
+            "note": "admin confirm cancel",
         }
     )
     save_logs(logs)
@@ -1414,9 +1417,9 @@ async def reschedule_student_command(update: Update, context: ContextTypes.DEFAU
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(tz).strftime("%Y-%m-%d"),
-            "status": f"rescheduled:{old_item}->{new_dt_str}",
-            "note": "admin_reschedule",
+            "date": old_item,
+            "status": "rescheduled",
+            "note": f"to {new_dt_str}",
             "admin": update.effective_user.id,
         }
     )
@@ -1611,15 +1614,15 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     user = query.from_user
     students = load_students()
-    _, student = resolve_student(students, str(user.id))
+    student_key, student = resolve_student(students, str(user.id))
     if not student and user.username:
-        _, student = resolve_student(students, user.username)
+        student_key, student = resolve_student(students, user.username)
     if not student:
         await query.edit_message_text("You are not recognised. Please contact your teacher.")
         return
     data = query.data
     if data == "my_classes":
-        await show_my_classes(query, student)
+        await show_my_classes(query, student_key, student)
     elif data == "cancel_class":
         await initiate_cancel_class(query, student)
     elif data == "free_credit":
@@ -1628,7 +1631,9 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("Unknown action.")
 
 
-def build_student_classes_text(student: Dict[str, Any], *, limit: int = 5) -> str:
+def build_student_classes_text(
+    student: Dict[str, Any], *, limit: int = 5, student_key: Optional[str] = None
+) -> str:
     """Return the text shown in a student's "My Classes" view."""
     limit = max(1, min(20, limit))
     upcoming_list = get_upcoming_classes(student, count=limit)
@@ -1642,12 +1647,61 @@ def build_student_classes_text(student: Dict[str, Any], *, limit: int = 5) -> st
     lines.append(f"Renewal date: {student.get('renewal_date', 'N/A')}")
     if student.get("paused"):
         lines.append("Your plan is currently paused.")
+
+    if student_key:
+        logs = load_logs()
+        student_logs = [
+            entry for entry in logs if entry.get("student") == student_key
+        ]
+
+        def parse_entry_dt(entry: Dict[str, Any]) -> datetime:
+            dt_str = entry.get("date", "")
+            try:
+                return datetime.fromisoformat(dt_str)
+            except Exception:
+                try:
+                    return datetime.fromisoformat(dt_str + "T00:00")
+                except Exception:
+                    return datetime.min
+
+        student_logs.sort(key=parse_entry_dt, reverse=True)
+        recent_logs = student_logs[:2]
+        if recent_logs:
+            lines.append("")
+            lines.append("Recent classes:")
+            tz = student_timezone(student)
+            for entry in recent_logs:
+                status = (entry.get("status") or "").lower()
+                if status == "completed":
+                    symbol = "✅"
+                elif status.startswith("missed") or status.startswith("cancelled") or status.startswith(
+                    "rescheduled"
+                ):
+                    symbol = "❌"
+                else:
+                    symbol = "•"
+                dt_txt = entry.get("date", "")
+                try:
+                    dt = datetime.fromisoformat(dt_txt)
+                    if dt.tzinfo is None:
+                        dt = safe_localize(tz, dt)
+                    dt_txt = dt.astimezone(tz).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+                note = entry.get("note") or ""
+                if note:
+                    lines.append(f"{symbol} {dt_txt} – {note}")
+                else:
+                    lines.append(f"{symbol} {dt_txt}")
+
     return "\n".join(lines)
 
 
-async def show_my_classes(query, student: Dict[str, Any]) -> None:
+async def show_my_classes(
+    query, student_key: str, student: Dict[str, Any]
+) -> None:
     """Display upcoming scheduled classes and remaining credits."""
-    text = build_student_classes_text(student, limit=5)
+    text = build_student_classes_text(student, limit=5, student_key=student_key)
     await query.edit_message_text(text, reply_markup=None)
 
 
@@ -1809,7 +1863,11 @@ async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     next_month = month_start.replace(day=28) + timedelta(days=4)
     month_end = next_month - timedelta(days=next_month.day)
     # Filter logs for the month
-    month_logs = [entry for entry in logs if month_start <= datetime.strptime(entry["date"], "%Y-%m-%d").date() <= month_end]
+    month_logs = [
+        entry
+        for entry in logs
+        if month_start <= parse_log_date(entry["date"]) <= month_end
+    ]
     # Dump to JSON string
     month_data = json.dumps(month_logs, indent=2, ensure_ascii=False)
     # Send as file to each admin
