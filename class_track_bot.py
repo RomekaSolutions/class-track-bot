@@ -457,7 +457,7 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
             continue
         if item in cancelled or dt.isoformat() in cancelled:
             continue
-        if renewal_date and dt.date() >= renewal_date:
+        if renewal_date and dt.date() > renewal_date:
             continue
         results.append(dt)
     results.sort()
@@ -1518,7 +1518,7 @@ async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Student not found.")
         return
 
-    # Retrieve upcoming classes, including those on the renewal date, and display
+    # Retrieve upcoming classes and display
     schedule = get_upcoming_classes(
         student, count=len(student.get("class_dates", []))
     )
@@ -1530,24 +1530,6 @@ async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
         except ValueError:
             renewal_date = None
-
-    # get_upcoming_classes excludes classes on the renewal date; add them back
-    if renewal_date:
-        tz = student_timezone(student)
-        now = datetime.now(tz)
-        cancelled = set(student.get("cancelled_dates", []))
-        for item in student.get("class_dates", []):
-            if item in cancelled:
-                continue
-            try:
-                dt = parse_student_datetime(item, student)
-            except Exception:
-                continue
-            if dt <= now:
-                continue
-            if dt.date() == renewal_date:
-                schedule.append(dt)
-        schedule.sort()
 
     lines = [f"Student: {student.get('name', student_key)}"]
     lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
