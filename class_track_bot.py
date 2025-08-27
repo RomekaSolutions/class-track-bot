@@ -531,7 +531,7 @@ async def send_class_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     local_dt = class_dt.astimezone(tz)
     msg = f"Reminder: you have a class at {local_dt.strftime('%Y-%m-%d %H:%M %Z')}"
     try:
-        await context.bot.send_message(chat_id=chat_id, text=msg)
+        await getattr(context, "bot", None).send_message(chat_id=chat_id, text=msg)
     except Exception:
         logging.warning("Failed to send class reminder to %s", student.get("name"))
 
@@ -1243,7 +1243,7 @@ async def log_class_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
 
     # After deducting, possibly notify the student about low or zero balance
-    await maybe_send_balance_warning(context.bot, student)
+    await maybe_send_balance_warning(getattr(context, "bot", None), student)
     save_students(students)
 
     # Record log
@@ -1299,6 +1299,7 @@ async def _cancel_class_command_legacy(update: Update, context: ContextTypes.DEF
     await update.message.reply_text(
         f"Cancelled a class for {student['name']}. They now have {student['reschedule_credit']} reschedule credit(s)."
     )
+    await refresh_student_menu(student_key, student, getattr(context, "bot", None))
 
 
 @admin_only
@@ -1394,7 +1395,7 @@ async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     )
     if not grant_credit and student.get("classes_remaining", 0) > 0:
         student["classes_remaining"] -= 1
-        await maybe_send_balance_warning(context.bot, student)
+        await maybe_send_balance_warning(getattr(context, "bot", None), student)
     save_students(students)
     logs = load_logs()
     logs.append(
@@ -1406,6 +1407,7 @@ async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
         }
     )
     save_logs(logs)
+    await refresh_student_menu(student_key, student, getattr(context, "bot", None))
     msg = (
         f"Cancelled {dt.strftime('%d %b %H:%M')}, reschedule credit granted."
         if grant_credit
@@ -1916,6 +1918,7 @@ async def edit_delweekly_callback(update: Update, context: ContextTypes.DEFAULT_
         }
     )
     save_logs(logs)
+    await refresh_student_menu(student_key, student, getattr(context, "bot", None))
     await query.edit_message_text(f"Removed weekly slot {removed} for {student['name']}.")
 
 
@@ -2117,7 +2120,7 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     else:
         if student.get("classes_remaining", 0) > 0:
             student["classes_remaining"] -= 1
-        await maybe_send_balance_warning(context.bot, student)
+        await maybe_send_balance_warning(getattr(context, "bot", None), student)
         response = (
             f"Cancellation confirmed for {student['name']}. One class deducted."
         )
@@ -2141,6 +2144,7 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     )
     save_logs(logs)
     await update.message.reply_text(response)
+    await refresh_student_menu(student_key, student, getattr(context, "bot", None))
 
 
 @admin_only
@@ -2243,6 +2247,7 @@ async def reschedule_student_command(update: Update, context: ContextTypes.DEFAU
     if warn_msg:
         msg += f" {warn_msg}"
     await update.message.reply_text(msg)
+    await refresh_student_menu(student_key, student, getattr(context, "bot", None))
 
 
 @admin_only
@@ -2413,6 +2418,20 @@ def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMar
     if student.get("free_class_credit", 0) > 0:
         buttons.append([InlineKeyboardButton("🎁 Free Class Credit", callback_data="free_credit")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def refresh_student_menu(
+    student_key: str, student: Dict[str, Any], bot
+) -> None:
+    """Send an updated /start summary to the student's chat."""
+    chat_id = student.get("telegram_id")
+    if not chat_id or bot is None:
+        return
+    text, markup = build_start_message(student)
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+    except Exception:
+        logging.warning("Failed to refresh menu for %s", student.get("name", student_key))
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2632,7 +2651,7 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     )
     for admin_id in ADMIN_IDS:
         try:
-            await context.bot.send_message(chat_id=admin_id, text=admin_message)
+            await getattr(context, "bot", None).send_message(chat_id=admin_id, text=admin_message)
         except Exception as e:
             logging.warning(
                 "Failed to notify admin %s about cancellation from %s: %s",
@@ -2682,6 +2701,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(
                     f"Class length updated to {duration}h for {student['name']}."
                 )
+                await refresh_student_menu(student_key, student, getattr(context, "bot", None))
                 context.user_data.pop("edit_state", None)
                 return
             if state == "await_addweekly":
@@ -2710,6 +2730,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(
                     f"Added weekly class {slot} for {student['name']}."
                 )
+                await refresh_student_menu(student_key, student, getattr(context, "bot", None))
                 context.user_data.pop("edit_state", None)
                 return
             if state == "await_time_all":
@@ -2752,6 +2773,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         [[InlineKeyboardButton("Back", callback_data=f"edit:pick:{student_key}")]]
                     ),
                 )
+                await refresh_student_menu(student_key, student, getattr(context, "bot", None))
                 context.user_data.pop("edit_state", None)
                 context.user_data.pop("edit_slot_index", None)
                 context.user_data.pop("edit_old_entry", None)
@@ -2810,6 +2832,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         [[InlineKeyboardButton("Back", callback_data=f"edit:pick:{student_key}")]]
                     ),
                 )
+                await refresh_student_menu(student_key, student, getattr(context, "bot", None))
                 context.user_data.pop("edit_state", None)
                 context.user_data.pop("edit_once_old_dt", None)
                 return
@@ -2843,6 +2866,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(
                     f"Cancelled class on {dt.strftime('%d %b %H:%M')}, credit granted.",
                 )
+                await refresh_student_menu(student_key, student, getattr(context, "bot", None))
                 context.user_data.pop("edit_state", None)
                 return
     await update.message.reply_text(
@@ -2896,7 +2920,7 @@ async def maybe_send_balance_warning(bot, student) -> bool:
 
 async def low_class_warning_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send warnings to students when their remaining classes are low."""
-    bot = context.bot
+    bot = getattr(context, "bot", None)
     students = load_students()
     changed = False
     for student in students.values():
@@ -2908,7 +2932,7 @@ async def low_class_warning_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """At the end of the month, send the logs JSON to the admin(s)."""
-    bot = context.bot
+    bot = getattr(context, "bot", None)
     # Only run on the last day of the month (checked by looking at tomorrow's day)
     today = datetime.now(BASE_TZ).date()
     if (today + timedelta(days=1)).day != 1:
