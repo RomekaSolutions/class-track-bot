@@ -155,3 +155,88 @@ def test_start_and_buttons(monkeypatch):
     query2 = DummyQuery("cancel_class")
     asyncio.run(ctb.student_button_handler(types.SimpleNamespace(callback_query=query2), types.SimpleNamespace()))
     assert query2.edited  # message sent
+
+
+def test_pending_cancel_banner_and_withdraw(monkeypatch):
+    tz = ctb.BASE_TZ
+    future_dt = tz.localize(datetime(2030, 1, 10, 9, 0))
+    student = {
+        "name": "A",
+        "class_dates": [future_dt.isoformat()],
+        "classes_remaining": 3,
+        "renewal_date": "2030-12-31",
+        "pending_cancel": {
+            "class_time": future_dt.isoformat(),
+            "requested_at": future_dt.isoformat(),
+            "type": "early",
+        },
+    }
+    students = {"1": student}
+    monkeypatch.setattr(ctb, "load_students", lambda: students)
+    monkeypatch.setattr(ctb, "save_students", lambda s: students.update(s))
+
+    class DummyQuery:
+        def __init__(self, data):
+            self.data = data
+            self.edited = []
+            self.message = types.SimpleNamespace(reply_text=lambda *a, **k: None)
+            self.from_user = types.SimpleNamespace(id=1, username="u")
+
+        async def answer(self):
+            pass
+
+        async def edit_message_text(self, text, reply_markup=None):
+            self.edited.append((text, reply_markup))
+
+    # My Classes should show banner and withdraw button
+    query = DummyQuery("my_classes")
+    asyncio.run(ctb.student_button_handler(types.SimpleNamespace(callback_query=query), types.SimpleNamespace()))
+    text, markup = query.edited[0]
+    assert "You requested to cancel" in text
+    assert any(
+        b.callback_data == "cancel_withdraw"
+        for row in markup.inline_keyboard
+        for b in row
+    )
+
+    # Withdraw should clear pending_cancel and re-render without banner
+    query2 = DummyQuery("cancel_withdraw")
+    asyncio.run(ctb.student_button_handler(types.SimpleNamespace(callback_query=query2), types.SimpleNamespace()))
+    text2, _ = query2.edited[0]
+    assert "You requested to cancel" not in text2
+    assert students["1"].get("pending_cancel") is None
+
+
+def test_cancel_replaces_pending(monkeypatch):
+    tz = ctb.BASE_TZ
+    dt1 = tz.localize(datetime(2030, 1, 5, 10, 0))
+    dt2 = tz.localize(datetime(2030, 1, 6, 11, 0))
+    student = {
+        "name": "A",
+        "class_dates": [dt1.isoformat(), dt2.isoformat()],
+        "pending_cancel": {
+            "class_time": dt1.isoformat(),
+            "requested_at": dt1.isoformat(),
+            "type": "early",
+        },
+    }
+    students = {"1": student}
+    monkeypatch.setattr(ctb, "load_students", lambda: students)
+    monkeypatch.setattr(ctb, "save_students", lambda s: students.update(s))
+
+    class DummyQuery:
+        def __init__(self, data):
+            self.data = data
+            self.edited = []
+            self.from_user = types.SimpleNamespace(id=1, username="u")
+
+        async def answer(self):
+            pass
+
+        async def edit_message_text(self, text, reply_markup=None):
+            self.edited.append((text, reply_markup))
+
+    query = DummyQuery("cancel_selected:1")
+    asyncio.run(ctb.handle_cancel_selection(types.SimpleNamespace(callback_query=query), types.SimpleNamespace(bot=None)))
+    assert students["1"]["pending_cancel"]["class_time"] == dt2.isoformat()
+    assert query.edited

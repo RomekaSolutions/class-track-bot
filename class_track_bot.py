@@ -2485,11 +2485,17 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     data = query.data
     logging.info("student_button_handler: user=%s data=%s", user.id, data)
     if data == "my_classes":
-        await show_my_classes(query, student_key, student)
+        await show_my_classes(
+            query, student_key, student, show_pending=bool(student.get("pending_cancel"))
+        )
     elif data == "cancel_class":
         await initiate_cancel_class(query, student)
     elif data == "free_credit":
         await show_free_credit(query, student)
+    elif data == "cancel_withdraw":
+        await handle_cancel_withdraw(
+            query, student_key, student, students, context
+        )
     elif data == "back_to_start":
         text, markup = build_start_message(student)
         await query.message.reply_text(text, reply_markup=markup)
@@ -2564,14 +2570,87 @@ def build_student_classes_text(
 
 
 async def show_my_classes(
-    query, student_key: str, student: Dict[str, Any]
+    query,
+    student_key: str,
+    student: Dict[str, Any],
+    *,
+    show_pending: bool = False,
 ) -> None:
-    """Display upcoming scheduled classes and remaining credits."""
+    """Display upcoming scheduled classes and remaining credits.
+
+    If ``show_pending`` is True and the student has a ``pending_cancel`` entry,
+    prepend a banner describing the pending cancellation and include a button to
+    withdraw or dismiss the request.
+    """
+
+    pending_banner = ""
+    buttons: List[List[InlineKeyboardButton]] = []
+    pending = student.get("pending_cancel") if show_pending else None
+    if pending:
+        try:
+            tz = student_timezone(student)
+            class_dt = parse_student_datetime(pending.get("class_time", ""), student)
+            class_str = class_dt.astimezone(tz).strftime("%a %d %b %H:%M")
+            now = datetime.now(tz)
+            if class_dt < now:
+                pending_banner = f"⚠️ Cancellation request for {class_str} expired."
+                buttons.append([InlineKeyboardButton("Dismiss", callback_data="cancel_withdraw")])
+            else:
+                pending_banner = (
+                    f"🕒 You requested to cancel: {class_str}. "
+                    "Waiting for teacher confirmation."
+                )
+                buttons.append(
+                    [InlineKeyboardButton("Withdraw request", callback_data="cancel_withdraw")]
+                )
+        except Exception:
+            pending_banner = ""
+
     text = build_student_classes_text(student, limit=5, student_key=student_key)
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")]]
-    )
+    if pending_banner:
+        text = f"{pending_banner}\n\n{text}"
+
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")])
+    keyboard = InlineKeyboardMarkup(buttons)
     await query.edit_message_text(text, reply_markup=keyboard)
+
+
+async def handle_cancel_withdraw(
+    query,
+    student_key: str,
+    student: Dict[str, Any],
+    students: Dict[str, Any],
+    context,
+) -> None:
+    """Withdraw or dismiss a pending cancellation request."""
+    pending = student.pop("pending_cancel", None)
+    save_students(students)
+    if pending:
+        student_name = student.get("name", student_key)
+        class_time_str = pending.get("class_time", "")
+        try:
+            tz = student_timezone(student)
+            dt = parse_student_datetime(class_time_str, student)
+            class_time_str = dt.astimezone(tz).strftime("%a %d %b %H:%M")
+        except Exception:
+            pass
+        admin_message = (
+            f"ℹ️ {student_name} withdrew the cancellation request for {class_time_str}."
+        )
+        for admin_id in ADMIN_IDS:
+            try:
+                await getattr(context, "bot", None).send_message(
+                    chat_id=admin_id, text=admin_message
+                )
+            except Exception as e:
+                logging.warning(
+                    "Failed to notify admin %s about withdrawal from %s: %s",
+                    admin_id,
+                    student_name,
+                    e,
+                )
+    await show_my_classes(query, student_key, student)
+    await refresh_student_menu(student_key, student, getattr(context, "bot", None))
 
 
 async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
@@ -2587,10 +2666,16 @@ async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
         buttons.append([InlineKeyboardButton(label, callback_data=callback)])
     keyboard = InlineKeyboardMarkup(buttons)
     cutoff_hours = student.get("cutoff_hours", DEFAULT_CUTOFF_HOURS)
-    intro = (
-        "Select a class to cancel:\n\n"
+    intro_lines = []
+    if student.get("pending_cancel"):
+        intro_lines.append(
+            "You already have a pending cancellation. Selecting a new class will replace it."
+        )
+    intro_lines.append("Select a class to cancel:\n")
+    intro_lines.append(
         f"Cancel more than {cutoff_hours} hours before the class to avoid a deduction."
     )
+    intro = "\n".join(intro_lines)
     await query.edit_message_text(intro, reply_markup=keyboard)
 
 
@@ -2622,6 +2707,7 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     cutoff_hours = student.get("cutoff_hours", DEFAULT_CUTOFF_HOURS)
     cutoff_dt = selected_dt - timedelta(hours=cutoff_hours)
     cancel_type = "early" if now_tz <= cutoff_dt else "late"
+    existing_pending = student.get("pending_cancel")
     student["pending_cancel"] = {
         "class_time": selected_dt.isoformat(),
         "requested_at": now_tz.isoformat(),
@@ -2629,14 +2715,15 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     }
     save_students(students)
     cutoff_str = cutoff_dt.astimezone(tz).strftime("%a %d %b %H:%M")
+    prefix = "Previous request replaced. " if existing_pending else ""
     if cancel_type == "early":
         message = (
-            "Cancellation request sent to your teacher. "
+            f"{prefix}Cancellation request sent to your teacher. "
             f"Cancel before {cutoff_str} ({cutoff_hours} hours in your timezone) = no deduction."
         )
     else:
         message = (
-            "Cancellation request sent to your teacher. "
+            f"{prefix}Cancellation request sent to your teacher. "
             f"You are within {cutoff_hours} hours (cutoff: {cutoff_str} your time) = one class deducted."
         )
     await query.edit_message_text(message)
