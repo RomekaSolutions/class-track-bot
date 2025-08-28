@@ -2799,14 +2799,20 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
             user.id if user else None,
             data,
         )
-        if DEBUG_MODE:
-            await safe_edit_or_send(
-                query,
-                "⚠️ An error occurred while handling your tap. A fresh menu will be sent.",
-            )
+        await safe_edit_or_send(
+            query, "Something went wrong. Refreshing your menu…"
+        )
+        if student:
             await refresh_student_menu(
-                student_key or str(user.id), student or {}, getattr(context, "bot", None)
+                student_key or str(user.id),
+                student,
+                getattr(context, "bot", None),
             )
+        else:
+            try:
+                await query.message.reply_text("Please send /start again.")
+            except Exception:
+                pass
         return
 
 
@@ -2829,11 +2835,17 @@ def build_student_classes_text(
 
     if student_key:
         logs = load_logs()
-        student_logs = [
-            entry for entry in logs if entry.get("student") == student_key
-        ]
 
-        def parse_entry_dt(entry: Dict[str, Any]) -> datetime:
+        def _matches(entry_key, target_key) -> bool:
+            return (
+                entry_key == target_key
+                or str(entry_key) == str(target_key)
+                or normalize_handle(str(entry_key)) == normalize_handle(str(target_key))
+            )
+
+        student_logs = [e for e in logs if _matches(e.get("student"), student_key)]
+
+        def _parse_entry_dt(entry: Dict[str, Any]) -> datetime:
             dt_str = entry.get("date", "")
             try:
                 return datetime.fromisoformat(dt_str)
@@ -2843,35 +2855,38 @@ def build_student_classes_text(
                 except Exception:
                     return datetime.min
 
-        student_logs.sort(key=parse_entry_dt, reverse=True)
+        student_logs.sort(key=_parse_entry_dt, reverse=True)
         recent_logs = student_logs[:2]
         if recent_logs:
             lines.append("")
             lines.append("Recent classes:")
             tz = student_timezone(student)
             for entry in recent_logs:
-                status = (entry.get("status") or "").lower()
-                if status == "completed":
-                    symbol = "✅"
-                elif status.startswith("missed") or status.startswith("cancelled") or status.startswith(
-                    "rescheduled"
-                ):
-                    symbol = "❌"
-                else:
-                    symbol = "•"
-                dt_txt = entry.get("date", "")
                 try:
-                    dt = datetime.fromisoformat(dt_txt)
-                    if dt.tzinfo is None:
-                        dt = safe_localize(tz, dt)
-                    dt_txt = dt.astimezone(tz).strftime("%Y-%m-%d")
+                    status = (entry.get("status") or "").lower()
+                    if status == "completed":
+                        symbol = "✅"
+                    elif status.startswith("missed") or status.startswith("cancelled") or status.startswith(
+                        "rescheduled"
+                    ):
+                        symbol = "❌"
+                    else:
+                        symbol = "•"
+                    dt_txt = entry.get("date", "")
+                    try:
+                        dt = datetime.fromisoformat(dt_txt)
+                        if dt.tzinfo is None:
+                            dt = safe_localize(tz, dt)
+                        dt_txt = dt.astimezone(tz).strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+                    note = entry.get("note") or ""
+                    if note:
+                        lines.append(f"{symbol} {dt_txt} – {note}")
+                    else:
+                        lines.append(f"{symbol} {dt_txt}")
                 except Exception:
-                    pass
-                note = entry.get("note") or ""
-                if note:
-                    lines.append(f"{symbol} {dt_txt} – {note}")
-                else:
-                    lines.append(f"{symbol} {dt_txt}")
+                    continue
 
     return "\n".join(lines)
 
@@ -2907,8 +2922,11 @@ async def show_my_classes(
             [InlineKeyboardButton("Withdraw request", callback_data="cancel_withdraw")]
         )
         buttons.append([InlineKeyboardButton("Dismiss", callback_data="cancel_dismiss")])
-
-    text = build_student_classes_text(student, limit=5, student_key=student_key)
+    try:
+        text = build_student_classes_text(student, limit=5, student_key=student_key)
+    except Exception:
+        logging.warning("show_my_classes build text failed", exc_info=True)
+        text = "Your classes are loading… (temporary issue)."
     if pending_banner:
         text = f"{pending_banner}\n\n{text}"
 
