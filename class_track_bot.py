@@ -2482,6 +2482,11 @@ async def safe_edit_or_send(
         await query.edit_message_text(**kwargs)
     except BadRequest as e:
         msg = str(e).lower()
+        log_extra = {
+            "user_id": getattr(query.from_user, "id", None),
+            "callback_data": getattr(query, "data", None),
+            "error": str(e),
+        }
         if any(
             phrase in msg
             for phrase in [
@@ -2491,19 +2496,9 @@ async def safe_edit_or_send(
                 "message is not modified",
             ]
         ):
-            logging.warning(
-                "safe_edit_or_send: edit failed for user=%s data=%s: %s",
-                getattr(query.from_user, "id", None),
-                getattr(query, "data", None),
-                e,
-            )
+            logging.warning("safe_edit_or_send edit fallback", extra=log_extra)
         else:
-            logging.warning(
-                "safe_edit_or_send: BadRequest for user=%s data=%s: %s",
-                getattr(query.from_user, "id", None),
-                getattr(query, "data", None),
-                e,
-            )
+            logging.exception("safe_edit_or_send BadRequest", extra=log_extra)
         await query.message.reply_text(
             text,
             reply_markup=reply_markup,
@@ -2512,10 +2507,12 @@ async def safe_edit_or_send(
         )
     except Exception as e:
         logging.exception(
-            "safe_edit_or_send: unexpected error for user=%s data=%s: %s",
-            getattr(query.from_user, "id", None),
-            getattr(query, "data", None),
-            e,
+            "safe_edit_or_send unexpected error",
+            extra={
+                "user_id": getattr(query.from_user, "id", None),
+                "callback_data": getattr(query, "data", None),
+                "error": str(e),
+            },
         )
         await query.message.reply_text(
             text,
