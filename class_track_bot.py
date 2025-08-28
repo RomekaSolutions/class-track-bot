@@ -196,16 +196,33 @@ def dedupe_student_keys(students: Dict[str, Any]) -> bool:
 
 
 def resolve_student(students: Dict[str, Any], key: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """Return (canonical_key, student) for given ID or handle input."""
+    """Return (canonical_key, student) for a given ID or handle input.
+
+    Preference is given to numeric ``telegram_id`` keys when available.  Handles
+    are normalised by stripping any leading ``@`` and lowercasing before
+    comparison.  The returned key is exactly as stored in ``students.json``.
+    """
+
     skey = normalize_handle(key)
-    if skey.isdigit() and str(int(skey)) in students:
+
+    # First try a direct numeric lookup
+    if skey.isdigit():
         canon = str(int(skey))
-        return canon, students[canon]
-    if skey in students:
-        return skey, students[skey]
+        student = students.get(canon)
+        if student is not None:
+            return canon, student
+
+    # Next search by handle or legacy keys, preferring numeric ids if present
     for k, s in students.items():
-        if normalize_handle(s.get("telegram_handle")) == skey:
+        telegram_id = s.get("telegram_id")
+        handle_match = skey == k or normalize_handle(s.get("telegram_handle")) == skey
+        id_match = telegram_id is not None and str(telegram_id) == skey
+        if handle_match or id_match:
+            if telegram_id is not None and str(telegram_id) in students:
+                canon = str(telegram_id)
+                return canon, students[canon]
             return k, s
+
     return None, None
 
 
@@ -343,16 +360,44 @@ def save_students(students: Dict[str, Any]) -> None:
         json.dump(students, f, indent=2, ensure_ascii=False, sort_keys=True)
 
 
+def normalize_log_students(
+    logs: List[Dict[str, Any]], students: Dict[str, Any]
+) -> bool:
+    """Normalise ``student`` fields in log entries to canonical keys.
+
+    Returns True if any log entries were modified.
+    """
+
+    changed = False
+    for entry in logs:
+        student_field = entry.get("student")
+        if student_field is None:
+            continue
+        normalized = normalize_handle(str(student_field))
+        canonical, _ = resolve_student(students, normalized)
+        new_key = canonical or normalized
+        if entry.get("student") != new_key:
+            entry["student"] = new_key
+            changed = True
+    return changed
+
+
 def load_logs() -> List[Dict[str, Any]]:
-    """Load class logs from JSON file."""
+    """Load class logs from JSON file and normalise student keys."""
     if not os.path.exists(LOGS_FILE):
         return []
     with open(LOGS_FILE, "r", encoding="utf-8") as f:
         try:
-            return json.load(f)
+            logs = json.load(f)
         except json.JSONDecodeError:
             logging.error("Failed to parse logs.json; starting with empty log.")
             return []
+
+    students = load_students()
+    if normalize_log_students(logs, students):
+        save_logs(logs)
+
+    return logs
 
 
 def save_logs(logs: List[Dict[str, Any]]) -> None:
@@ -2568,7 +2613,17 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     if not student and user.username:
         student_key, student = resolve_student(students, user.username)
     if not student:
-        await safe_edit_or_send(query, "You are not recognised. Please contact your teacher.")
+        logging.warning(
+            "student_button_handler unresolved student",
+            extra={
+                "user_id": user.id,
+                "username": user.username,
+                "callback_data": query.data,
+            },
+        )
+        await safe_edit_or_send(
+            query, "You are not recognised. Please contact your teacher."
+        )
         return
     data = query.data
     logging.info("student_button_handler: user=%s data=%s", user.id, data)
