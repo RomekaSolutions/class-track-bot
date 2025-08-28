@@ -39,6 +39,7 @@ Author: ChatGPT
 import json
 import logging
 import os
+import inspect
 from datetime import datetime, timedelta, time, date
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -61,6 +62,11 @@ from telegram.ext import (
     JobQueue,
     filters,
 )
+try:
+    from telegram.error import BadRequest
+except Exception:  # pragma: no cover - fallback for environments without telegram.error
+    class BadRequest(Exception):
+        pass
 
 # Additional imports for timezone handling
 import pytz
@@ -2454,6 +2460,71 @@ async def refresh_student_my_classes(
         )
 
 
+async def safe_edit_or_send(
+    query,
+    text: str,
+    reply_markup=None,
+    parse_mode=None,
+    disable_web_page_preview: bool = True,
+) -> None:
+    """Safely edit a message, or send a new one if editing fails."""
+    kwargs = {"text": text, "reply_markup": reply_markup}
+    try:
+        sig = inspect.signature(query.edit_message_text)
+        if "parse_mode" in sig.parameters:
+            kwargs["parse_mode"] = parse_mode
+        if "disable_web_page_preview" in sig.parameters:
+            kwargs["disable_web_page_preview"] = disable_web_page_preview
+    except Exception:
+        kwargs["parse_mode"] = parse_mode
+        kwargs["disable_web_page_preview"] = disable_web_page_preview
+    try:
+        await query.edit_message_text(**kwargs)
+    except BadRequest as e:
+        msg = str(e).lower()
+        if any(
+            phrase in msg
+            for phrase in [
+                "message can't be edited",
+                "message to edit not found",
+                "message is too old",
+                "message is not modified",
+            ]
+        ):
+            logging.warning(
+                "safe_edit_or_send: edit failed for user=%s data=%s: %s",
+                getattr(query.from_user, "id", None),
+                getattr(query, "data", None),
+                e,
+            )
+        else:
+            logging.warning(
+                "safe_edit_or_send: BadRequest for user=%s data=%s: %s",
+                getattr(query.from_user, "id", None),
+                getattr(query, "data", None),
+                e,
+            )
+        await query.message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+    except Exception as e:
+        logging.exception(
+            "safe_edit_or_send: unexpected error for user=%s data=%s: %s",
+            getattr(query.from_user, "id", None),
+            getattr(query, "data", None),
+            e,
+        )
+        await query.message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start for students.  Show upcoming class, remaining credits and renewal date."""
     students = load_students()
@@ -2500,7 +2571,7 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     if not student and user.username:
         student_key, student = resolve_student(students, user.username)
     if not student:
-        await query.edit_message_text("You are not recognised. Please contact your teacher.")
+        await safe_edit_or_send(query, "You are not recognised. Please contact your teacher.")
         return
     data = query.data
     logging.info("student_button_handler: user=%s data=%s", user.id, data)
@@ -2520,9 +2591,9 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         await handle_cancel_dismiss(query, student_key, student)
     elif data == "back_to_start":
         text, markup = build_start_message(student)
-        await query.message.reply_text(text, reply_markup=markup)
+        await safe_edit_or_send(query, text, reply_markup=markup)
     else:
-        await query.edit_message_text("Unknown action.")
+        await safe_edit_or_send(query, "Unknown action.")
 
 
 def build_student_classes_text(
@@ -2629,7 +2700,7 @@ async def show_my_classes(
 
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")])
     keyboard = InlineKeyboardMarkup(buttons)
-    await query.edit_message_text(text, reply_markup=keyboard)
+    await safe_edit_or_send(query, text, reply_markup=keyboard)
 
 
 async def handle_cancel_withdraw(
@@ -2679,7 +2750,7 @@ async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
     """Begin the cancellation process.  Show a list of upcoming classes."""
     upcoming_list = get_upcoming_classes(student, count=5)
     if not upcoming_list:
-        await query.edit_message_text("You have no classes to cancel.")
+        await safe_edit_or_send(query, "You have no classes to cancel.")
         return
     buttons = []
     for idx, dt in enumerate(upcoming_list):
@@ -2698,7 +2769,7 @@ async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
         f"Cancel more than {cutoff_hours} hours before the class to avoid a deduction."
     )
     intro = "\n".join(intro_lines)
-    await query.edit_message_text(intro, reply_markup=keyboard)
+    await safe_edit_or_send(query, intro, reply_markup=keyboard)
 
 
 async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2711,17 +2782,17 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     if not student and user.username:
         student_key, student = resolve_student(students, user.username)
     if not student:
-        await query.edit_message_text("You are not recognised. Please contact your teacher.")
+        await safe_edit_or_send(query, "You are not recognised. Please contact your teacher.")
         return
     _, index_str = query.data.split(":")
     try:
         idx = int(index_str)
     except ValueError:
-        await query.edit_message_text("Invalid selection.")
+        await safe_edit_or_send(query, "Invalid selection.")
         return
     upcoming = get_upcoming_classes(student, count=5)
     if idx >= len(upcoming):
-        await query.edit_message_text("Invalid class selected.")
+        await safe_edit_or_send(query, "Invalid class selected.")
         return
     selected_dt = upcoming[idx]
     tz = student_timezone(student)
@@ -2752,7 +2823,8 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
             f"{prefix}Cancellation request sent to your teacher. "
             f"You are within {cutoff_hours} hours (cutoff: {cutoff_str} your time) = one class deducted."
         )
-    await query.edit_message_text(message)
+    await safe_edit_or_send(query, message)
+    await refresh_student_menu(student_key, student, getattr(context, "bot", None))
 
     # Notify all admins about the cancellation request
     student_name = student.get("name", student_key)
@@ -2994,7 +3066,7 @@ async def show_free_credit(query, student: Dict[str, Any]) -> None:
         msg = f"You have {credits} free class credit{'s' if credits > 1 else ''}. You can use it at any time!"
     else:
         msg = "You currently have no free class credits."
-    await query.edit_message_text(msg)
+    await safe_edit_or_send(query, msg)
 
 
 # -----------------------------------------------------------------------------
@@ -3159,7 +3231,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_time_slot_callback, pattern="^edit:time:slot:"))
     application.add_handler(CallbackQueryHandler(edit_time_scope_callback, pattern="^edit:time:scope:"))
     application.add_handler(CallbackQueryHandler(edit_time_oncepick_callback, pattern="^edit:time:oncepick:"))
-    application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:", block=False))
+    application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:"))
     application.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern="^admin_cancel_sel:"))
     application.add_handler(CallbackQueryHandler(student_button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
