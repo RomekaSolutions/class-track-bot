@@ -157,7 +157,7 @@ def test_start_and_buttons(monkeypatch):
     assert query2.edited  # message sent
 
 
-def test_pending_cancel_banner_and_withdraw(monkeypatch):
+def test_pending_cancel_banner_withdraw_and_dismiss(monkeypatch):
     tz = ctb.BASE_TZ
     future_dt = tz.localize(datetime(2030, 1, 10, 9, 0))
     student = {
@@ -188,22 +188,28 @@ def test_pending_cancel_banner_and_withdraw(monkeypatch):
         async def edit_message_text(self, text, reply_markup=None):
             self.edited.append((text, reply_markup))
 
-    # My Classes should show banner and withdraw button
+    # My Classes should show banner with withdraw and dismiss buttons
     query = DummyQuery("my_classes")
     asyncio.run(ctb.student_button_handler(types.SimpleNamespace(callback_query=query), types.SimpleNamespace()))
     text, markup = query.edited[0]
-    assert "You requested to cancel" in text
-    assert any(
-        b.callback_data == "cancel_withdraw"
-        for row in markup.inline_keyboard
-        for b in row
-    )
+    assert "Cancellation requested" in text
+    callbacks = [
+        b.callback_data for row in markup.inline_keyboard for b in row
+    ]
+    assert "cancel_withdraw" in callbacks and "cancel_dismiss" in callbacks
+
+    # Dismiss should keep pending_cancel but re-render without banner
+    query_dismiss = DummyQuery("cancel_dismiss")
+    asyncio.run(ctb.student_button_handler(types.SimpleNamespace(callback_query=query_dismiss), types.SimpleNamespace()))
+    text_dismiss, _ = query_dismiss.edited[0]
+    assert "Cancellation requested" not in text_dismiss
+    assert students["1"].get("pending_cancel") is not None
 
     # Withdraw should clear pending_cancel and re-render without banner
-    query2 = DummyQuery("cancel_withdraw")
-    asyncio.run(ctb.student_button_handler(types.SimpleNamespace(callback_query=query2), types.SimpleNamespace()))
-    text2, _ = query2.edited[0]
-    assert "You requested to cancel" not in text2
+    query_withdraw = DummyQuery("cancel_withdraw")
+    asyncio.run(ctb.student_button_handler(types.SimpleNamespace(callback_query=query_withdraw), types.SimpleNamespace()))
+    text_withdraw, _ = query_withdraw.edited[0]
+    assert "Cancellation requested" not in text_withdraw
     assert students["1"].get("pending_cancel") is None
 
 
@@ -240,3 +246,57 @@ def test_cancel_replaces_pending(monkeypatch):
     asyncio.run(ctb.handle_cancel_selection(types.SimpleNamespace(callback_query=query), types.SimpleNamespace(bot=None)))
     assert students["1"]["pending_cancel"]["class_time"] == dt2.isoformat()
     assert query.edited
+    text, _ = query.edited[0]
+    assert "previous cancellation request has been replaced" in text
+
+
+def test_confirmcancel_clears_pending_and_refreshes(monkeypatch):
+    tz = ctb.BASE_TZ
+    future_dt = tz.localize(datetime(2030, 2, 1, 9, 0))
+    student = {
+        "name": "A",
+        "telegram_id": 10,
+        "class_dates": [future_dt.isoformat()],
+        "classes_remaining": 2,
+        "pending_cancel": {
+            "class_time": future_dt.isoformat(),
+            "requested_at": future_dt.isoformat(),
+            "type": "late",
+        },
+    }
+    students = {"1": student}
+    monkeypatch.setattr(ctb, "load_students", lambda: students)
+    monkeypatch.setattr(ctb, "save_students", lambda s: students.update(s))
+    monkeypatch.setattr(ctb, "schedule_student_reminders", lambda app, key, s: None)
+
+    admin_replies = []
+    class DummyMessage:
+        async def reply_text(self, text):
+            admin_replies.append(text)
+
+    sent = []
+    class DummyBot:
+        async def send_message(self, chat_id, text, reply_markup=None):
+            sent.append((chat_id, text, reply_markup))
+
+    context = types.SimpleNamespace(
+        args=["1"],
+        bot=DummyBot(),
+        application=types.SimpleNamespace(job_queue=types.SimpleNamespace(jobs=lambda: [])),
+    )
+    update = types.SimpleNamespace(
+        message=DummyMessage(),
+        effective_user=types.SimpleNamespace(id=list(ctb.ADMIN_IDS)[0]),
+    )
+
+    asyncio.run(ctb.confirm_cancel_command(update, context))
+    assert students["1"].get("pending_cancel") is None
+    assert admin_replies
+    # Ensure My Classes view sent without banner
+    assert any(
+        any(b.callback_data == "back_to_start" for b in row)
+        for _, _, markup in sent
+        if markup
+        for row in markup.inline_keyboard
+    )
+    assert all("Cancellation requested" not in text for _, text, _ in sent)
