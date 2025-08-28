@@ -103,6 +103,10 @@ else:
     ADMIN_IDS = {123456789}
 
 
+# Debug flag controlling extra diagnostics
+DEBUG_MODE = os.environ.get("CTRACK_DEBUG", "0") == "1"
+
+
 # Paths to the JSON database files.  Adjust if you wish to store them elsewhere.
 STUDENTS_FILE = "students.json"
 LOGS_FILE = "logs.json"
@@ -2443,6 +2447,125 @@ async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # -----------------------------------------------------------------------------
+# Diagnostic and admin helper commands
+
+
+@admin_only
+async def selftest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Self-test: tap Ping, then My Classes in student chat.",
+        reply_markup=build_debug_keyboard(),
+    )
+    logging.warning("SELFTEST marker fired")
+
+
+@admin_only
+async def datacheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    students = load_students()
+    logs = load_logs()
+    total = len(students)
+    both_fields = sum(
+        1
+        for s in students.values()
+        if s.get("telegram_id") and s.get("telegram_handle")
+    )
+    mismatch = sum(
+        1
+        for key, s in students.items()
+        if s.get("telegram_id") and key != str(s.get("telegram_id"))
+    )
+    pending_cancel = sum(1 for s in students.values() if s.get("pending_cancel"))
+    logging.info(
+        "datacheck stats total=%s both=%s mismatch=%s pending_cancel=%s",
+        total,
+        both_fields,
+        mismatch,
+        pending_cancel,
+    )
+
+    canonical: Dict[str, str] = {}
+    for key, s in students.items():
+        tid = s.get("telegram_id")
+        handle = normalize_handle(s.get("telegram_handle"))
+        canon = str(tid) if tid else (handle or normalize_handle(key))
+        canonical[key] = canon
+
+    rekeyed = 0
+    if any(key != canon for key, canon in canonical.items()):
+        new_students: Dict[str, Any] = {}
+        for key, s in students.items():
+            canon = canonical[key]
+            existing = new_students.get(canon)
+            if existing:
+                for k, v in s.items():
+                    if k not in existing:
+                        existing[k] = v
+            else:
+                new_students[canon] = s
+            if key != canon:
+                rekeyed += 1
+        students.clear()
+        students.update(new_students)
+
+    id_map = {
+        str(s.get("telegram_id")): key
+        for key, s in students.items()
+        if s.get("telegram_id")
+    }
+    handle_map: Dict[str, str] = {}
+    for key, s in students.items():
+        handle = normalize_handle(s.get("telegram_handle"))
+        if handle:
+            handle_map[handle] = key
+        handle_map[normalize_handle(key)] = key
+
+    logs_fixed = 0
+    for entry in logs:
+        val = entry.get("student")
+        canon = None
+        if val in students:
+            canon = val
+        else:
+            val_str = str(val)
+            norm = normalize_handle(val_str)
+            if val_str in students:
+                canon = val_str
+            elif val_str in id_map:
+                canon = id_map[val_str]
+            elif norm in handle_map:
+                canon = handle_map[norm]
+        if canon and canon != val:
+            entry["student"] = canon
+            logs_fixed += 1
+
+    if rekeyed:
+        save_students(students)
+    if logs_fixed:
+        save_logs(logs)
+
+    await update.message.reply_text(
+        f"DataCheck: students={total}, rekeyed={rekeyed}, logs_fixed={logs_fixed}, pending_cancel={pending_cancel}"
+    )
+
+
+@admin_only
+async def nukepending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or context.args[0].lower() != "confirm":
+        await update.message.reply_text("Usage: /nukepending confirm")
+        return
+    students = load_students()
+    count = 0
+    for s in students.values():
+        if s.pop("pending_cancel", None):
+            count += 1
+    if count:
+        save_students(students)
+    await update.message.reply_text(
+        f"Cleared pending_cancel for {count} students."
+    )
+
+
+# -----------------------------------------------------------------------------
 # Student interface handlers
 # -----------------------------------------------------------------------------
 
@@ -2526,45 +2649,53 @@ async def safe_edit_or_send(
     try:
         await query.edit_message_text(**kwargs)
     except BadRequest as e:
-        msg = str(e).lower()
-        log_extra = {
-            "user_id": getattr(query.from_user, "id", None),
-            "callback_data": getattr(query, "data", None),
-            "error": str(e),
-        }
-        if any(
-            phrase in msg
-            for phrase in [
-                "message can't be edited",
-                "message to edit not found",
-                "message is too old",
-                "message is not modified",
-            ]
-        ):
-            logging.warning("safe_edit_or_send edit fallback", extra=log_extra)
-        else:
-            logging.exception("safe_edit_or_send BadRequest", extra=log_extra)
+        logging.warning(
+            "edit\u2192send fallback user=%s data=%s err=%s",
+            query.from_user.id if query and query.from_user else None,
+            getattr(query, "data", None),
+            str(e),
+        )
+        if DEBUG_MODE:
+            try:
+                await query.answer("fallback: sent new message", show_alert=False)
+            except Exception:
+                pass
         await query.message.reply_text(
             text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,
             disable_web_page_preview=disable_web_page_preview,
         )
-    except Exception as e:
-        logging.exception(
-            "safe_edit_or_send unexpected error",
-            extra={
-                "user_id": getattr(query.from_user, "id", None),
-                "callback_data": getattr(query, "data", None),
-                "error": str(e),
-            },
-        )
+    except Exception:
+        logging.exception("safe_edit_or_send unexpected error")
+        if DEBUG_MODE:
+            try:
+                await query.answer("fallback: unexpected", show_alert=False)
+            except Exception:
+                pass
         await query.message.reply_text(
             text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,
             disable_web_page_preview=disable_web_page_preview,
         )
+
+
+def build_debug_keyboard() -> InlineKeyboardMarkup:
+    """Return a keyboard with a single ping button for diagnostics."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🔧 Ping", callback_data="__ping__")]]
+    )
+
+
+async def debug_ping_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Respond to ping button presses to verify callback handling."""
+    await update.callback_query.answer("pong", show_alert=False)
+    await safe_edit_or_send(
+        update.callback_query,
+        "Debug pong ✅",
+        reply_markup=build_debug_keyboard() if DEBUG_MODE else None,
+    )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2608,44 +2739,75 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer()
     user = query.from_user
-    students = load_students()
-    student_key, student = resolve_student(students, str(user.id))
-    if not student and user.username:
-        student_key, student = resolve_student(students, user.username)
-    if not student:
-        logging.warning(
-            "student_button_handler unresolved student",
-            extra={
-                "user_id": user.id,
-                "username": user.username,
-                "callback_data": query.data,
-            },
-        )
-        await safe_edit_or_send(
-            query, "You are not recognised. Please contact your teacher."
-        )
-        return
     data = query.data
-    logging.info("student_button_handler: user=%s data=%s", user.id, data)
-    if data == "my_classes":
-        await show_my_classes(
-            query, student_key, student, show_pending=bool(student.get("pending_cancel"))
+    message_id = getattr(getattr(query, "message", None), "message_id", None)
+    logging.info(
+        "student_button_handler entry user=%s username=%s data=%s msg_id=%s",
+        user.id if user else None,
+        getattr(user, "username", None),
+        data,
+        message_id,
+    )
+    if DEBUG_MODE:
+        try:
+            await query.answer(f"tap:{data}", show_alert=False)
+        except Exception:
+            pass
+    student_key = None
+    student = None
+    try:
+        students = load_students()
+        student_key, student = resolve_student(students, str(user.id))
+        if not student and user.username:
+            student_key, student = resolve_student(students, user.username)
+        if not student:
+            logging.warning(
+                "student_button_handler unresolved student",
+                extra={
+                    "user_id": user.id,
+                    "username": user.username,
+                    "callback_data": query.data,
+                },
+            )
+            await safe_edit_or_send(
+                query, "You are not recognised. Please contact your teacher."
+            )
+            return
+        logging.info("student_button_handler: user=%s data=%s", user.id, data)
+        if data == "my_classes":
+            await show_my_classes(
+                query, student_key, student, show_pending=bool(student.get("pending_cancel"))
+            )
+        elif data == "cancel_class":
+            await initiate_cancel_class(query, student)
+        elif data == "free_credit":
+            await show_free_credit(query, student)
+        elif data == "cancel_withdraw":
+            await handle_cancel_withdraw(
+                query, student_key, student, students, context
+            )
+        elif data == "cancel_dismiss":
+            await handle_cancel_dismiss(query, student_key, student)
+        elif data == "back_to_start":
+            text, markup = build_start_message(student)
+            await safe_edit_or_send(query, text, reply_markup=markup)
+        else:
+            await safe_edit_or_send(query, "Unknown action.")
+    except Exception:
+        logging.exception(
+            "student_button_handler error user=%s data=%s",
+            user.id if user else None,
+            data,
         )
-    elif data == "cancel_class":
-        await initiate_cancel_class(query, student)
-    elif data == "free_credit":
-        await show_free_credit(query, student)
-    elif data == "cancel_withdraw":
-        await handle_cancel_withdraw(
-            query, student_key, student, students, context
-        )
-    elif data == "cancel_dismiss":
-        await handle_cancel_dismiss(query, student_key, student)
-    elif data == "back_to_start":
-        text, markup = build_start_message(student)
-        await safe_edit_or_send(query, text, reply_markup=markup)
-    else:
-        await safe_edit_or_send(query, "Unknown action.")
+        if DEBUG_MODE:
+            await safe_edit_or_send(
+                query,
+                "⚠️ An error occurred while handling your tap. A fresh menu will be sent.",
+            )
+            await refresh_student_menu(
+                student_key or str(user.id), student or {}, getattr(context, "bot", None)
+            )
+        return
 
 
 def build_student_classes_text(
@@ -3268,6 +3430,9 @@ def main() -> None:
     application.add_handler(CommandHandler("edit", edit_command))
     application.add_handler(CommandHandler("dashboard", dashboard_command))
     application.add_handler(CommandHandler("downloadmonth", download_month_command))
+    application.add_handler(CommandHandler("selftest", selftest_command))
+    application.add_handler(CommandHandler("datacheck", datacheck_command))
+    application.add_handler(CommandHandler("nukepending", nukepending_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
     application.add_handler(CommandHandler("removestudent", remove_student_command))
@@ -3285,6 +3450,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_time_oncepick_callback, pattern="^edit:time:oncepick:"))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:"))
     application.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern="^admin_cancel_sel:"))
+    application.add_handler(CallbackQueryHandler(debug_ping_callback, pattern="^__ping__$"))
     application.add_handler(CallbackQueryHandler(student_button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # Ensure schedules extend into the future and reminders are set
