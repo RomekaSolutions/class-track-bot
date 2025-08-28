@@ -2145,6 +2145,7 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
     save_logs(logs)
     await update.message.reply_text(response)
     await refresh_student_menu(student_key, student, getattr(context, "bot", None))
+    await refresh_student_my_classes(student_key, student, getattr(context, "bot", None))
 
 
 @admin_only
@@ -2434,6 +2435,25 @@ async def refresh_student_menu(
         logging.warning("Failed to refresh menu for %s", student.get("name", student_key))
 
 
+async def refresh_student_my_classes(
+    student_key: str, student: Dict[str, Any], bot
+) -> None:
+    """Send the current "My Classes" view to the student's chat."""
+    chat_id = student.get("telegram_id")
+    if not chat_id or bot is None:
+        return
+    text = build_student_classes_text(student, limit=5, student_key=student_key)
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")]]
+    )
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+    except Exception:
+        logging.warning(
+            "Failed to refresh My Classes for %s", student.get("name", student_key)
+        )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start for students.  Show upcoming class, remaining credits and renewal date."""
     students = load_students()
@@ -2496,6 +2516,8 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         await handle_cancel_withdraw(
             query, student_key, student, students, context
         )
+    elif data == "cancel_dismiss":
+        await handle_cancel_dismiss(query, student_key, student)
     elif data == "back_to_start":
         text, markup = build_start_message(student)
         await query.message.reply_text(text, reply_markup=markup)
@@ -2591,20 +2613,15 @@ async def show_my_classes(
             tz = student_timezone(student)
             class_dt = parse_student_datetime(pending.get("class_time", ""), student)
             class_str = class_dt.astimezone(tz).strftime("%a %d %b %H:%M")
-            now = datetime.now(tz)
-            if class_dt < now:
-                pending_banner = f"⚠️ Cancellation request for {class_str} expired."
-                buttons.append([InlineKeyboardButton("Dismiss", callback_data="cancel_withdraw")])
-            else:
-                pending_banner = (
-                    f"🕒 You requested to cancel: {class_str}. "
-                    "Waiting for teacher confirmation."
-                )
-                buttons.append(
-                    [InlineKeyboardButton("Withdraw request", callback_data="cancel_withdraw")]
-                )
         except Exception:
-            pending_banner = ""
+            class_str = pending.get("class_time", "")
+        pending_banner = (
+            f"⚠️ Cancellation requested for {class_str} – awaiting teacher confirmation."
+        )
+        buttons.append(
+            [InlineKeyboardButton("Withdraw request", callback_data="cancel_withdraw")]
+        )
+        buttons.append([InlineKeyboardButton("Dismiss", callback_data="cancel_dismiss")])
 
     text = build_student_classes_text(student, limit=5, student_key=student_key)
     if pending_banner:
@@ -2622,7 +2639,7 @@ async def handle_cancel_withdraw(
     students: Dict[str, Any],
     context,
 ) -> None:
-    """Withdraw or dismiss a pending cancellation request."""
+    """Withdraw a pending cancellation request."""
     pending = student.pop("pending_cancel", None)
     save_students(students)
     if pending:
@@ -2651,6 +2668,11 @@ async def handle_cancel_withdraw(
                 )
     await show_my_classes(query, student_key, student)
     await refresh_student_menu(student_key, student, getattr(context, "bot", None))
+
+
+async def handle_cancel_dismiss(query, student_key: str, student: Dict[str, Any]) -> None:
+    """Dismiss the pending cancellation banner without clearing the request."""
+    await show_my_classes(query, student_key, student, show_pending=False)
 
 
 async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
@@ -2715,7 +2737,11 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     }
     save_students(students)
     cutoff_str = cutoff_dt.astimezone(tz).strftime("%a %d %b %H:%M")
-    prefix = "Previous request replaced. " if existing_pending else ""
+    prefix = (
+        "Your previous cancellation request has been replaced with this new one. "
+        if existing_pending
+        else ""
+    )
     if cancel_type == "early":
         message = (
             f"{prefix}Cancellation request sent to your teacher. "
