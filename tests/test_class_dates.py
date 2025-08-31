@@ -133,4 +133,4 @@ def test_mixed_log_timestamps_sort(monkeypatch):
     lines = text.splitlines()
     recent_idx = lines.index("Recent classes:")
     first_log = lines[recent_idx + 1]
-    assert "Wed 03 Jan 09:00 ICT" in first_log
+    assert "Wed 03 Jan 09:00" in first_log

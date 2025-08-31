@@ -148,10 +148,22 @@ def bkk_min():
     return datetime.min.replace(tzinfo=BKK_TZ)
 
 
-def fmt_bkk(dt):
-    """Format datetime for human display in Bangkok timezone."""
+def fmt_bkk(dt, add_label: bool = False):
+    """Format datetime for human display in Bangkok timezone.
+
+    Parameters
+    ----------
+    dt:
+        Datetime or parseable string.
+    add_label:
+        If True, append ``" ICT"`` to the formatted string.
+    """
+
     dt = ensure_bangkok(dt)
-    return dt.strftime("%a %d %b %H:%M") + " ICT"
+    text = dt.strftime("%a %d %b %H:%M")
+    if add_label:
+        text += " ICT"
+    return text
 
 # Weekday helpers used throughout scheduling utilities
 WEEKDAY_NAMES = [
@@ -1813,7 +1825,116 @@ async def dayview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display a summary dashboard to the admin."""
     summary = generate_dashboard_summary()
-    await update.message.reply_text(summary)
+    buttons = [
+        [InlineKeyboardButton("🕒 Pending Actions", callback_data="admin_pending")]
+    ]
+    markup = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(summary, reply_markup=markup)
+
+
+async def render_admin_pending(target, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Render the list of pending cancellation actions for admins."""
+
+    students = load_students()
+    pending_items: List[Tuple[str, Dict[str, Any]]] = [
+        (sid, s) for sid, s in students.items() if s.get("pending_cancel")
+    ]
+    lines: List[str] = []
+    buttons: List[List[InlineKeyboardButton]] = []
+
+    if pending_items:
+        lines.append("🕒 Pending cancellations:")
+        lines.append("")
+        for sid, student in pending_items:
+            pending = student.get("pending_cancel", {})
+            class_time = pending.get("class_time")
+            try:
+                dt = ensure_bangkok(class_time)
+                class_str = fmt_bkk(dt, add_label=False)
+            except Exception:
+                logging.warning("Bad pending_cancel datetime for %s: %s", sid, pending)
+                continue
+            cancel_type = pending.get("type")
+            type_str = f" ({cancel_type})" if cancel_type else ""
+            handle = student.get("telegram_handle")
+            display = student.get("name", sid)
+            if handle:
+                display += f" @{normalize_handle(handle)}"
+            lines.append(f"- {display} — {class_str}{type_str}")
+
+            short_name = (
+                f"@{normalize_handle(handle)}" if handle else student.get("name", "").split()[0]
+            )
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"✅ Confirm — {short_name}",
+                        callback_data=f"confirm_pending:{sid}",
+                    )
+                ]
+            )
+    else:
+        lines.append("No pending actions ✅")
+
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")])
+    text = "\n".join(lines)
+    await safe_edit_or_send(target, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+@admin_only
+async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Entry point for /pending command."""
+
+    await render_admin_pending(update.message, context)
+
+
+@admin_only
+async def admin_pending_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle callback for pending actions list."""
+
+    query = update.callback_query
+    await query.answer()
+    await render_admin_pending(query, context)
+
+
+@admin_only
+async def confirm_pending_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One-tap confirmation of pending cancellations."""
+
+    query = update.callback_query
+    await query.answer()
+    student_id = query.data.split(":", 1)[1]
+    students = load_students()
+    student = students.get(student_id)
+    if not student or not student.get("pending_cancel"):
+        await query.message.reply_text("Pending item not found.")
+        await render_admin_pending(query, context)
+        return
+
+    try:
+        response, class_time_str = await confirm_cancel_for_student(
+            context, students, student_id, student
+        )
+    except ValueError as exc:
+        await query.message.reply_text(str(exc))
+        await render_admin_pending(query, context)
+        return
+
+    try:
+        dt = ensure_bangkok(class_time_str)
+        class_txt = fmt_bkk(dt, add_label=False)
+    except Exception:
+        class_txt = class_time_str
+
+    handle = student.get("telegram_handle")
+    display = f"@{normalize_handle(handle)}" if handle else student.get("name")
+    msg = f"Confirmed cancel for {display} on {class_txt}."
+    try:
+        await query.message.reply_text(msg)
+    except BadRequest:
+        await safe_edit_or_send(query, msg)
+
+    await render_admin_pending(query, context)
 
 
 @admin_only
@@ -2156,39 +2277,32 @@ async def download_month_command(update: Update, context: ContextTypes.DEFAULT_T
             os.remove(filename)
 
 
-@admin_only
-async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Confirm a student's cancellation request.
+async def confirm_cancel_for_student(
+    context: ContextTypes.DEFAULT_TYPE,
+    students: Dict[str, Any],
+    student_key: str,
+    student: Dict[str, Any],
+) -> Tuple[str, str]:
+    """Core logic to confirm a student's pending cancellation.
 
-    Usage: /confirmcancel <student_key>
-
-    The pending cancellation contains a "type" field ("early" or "late").
-    Early cancels award a reschedule credit; late cancels deduct a class.
-    The cancelled class time is recorded in the student's ``cancelled_dates``.
+    Returns a tuple ``(response_message, class_time_str)``.  Raises ``ValueError``
+    if there is no pending cancellation or the class time is malformed.
     """
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /confirmcancel <student_key>")
-        return
-    student_key_input = args[0]
-    students = load_students()
-    student_key, student = resolve_student(students, student_key_input)
-    if not student:
-        await update.message.reply_text(f"Student '{student_key_input}' not found.")
-        return
+
     pending_cancel = student.get("pending_cancel")
     if not pending_cancel:
-        await update.message.reply_text("There is no pending cancellation to confirm.")
-        return
+        raise ValueError("There is no pending cancellation to confirm.")
+
     class_time_str = pending_cancel.get("class_time")
     try:
         datetime.fromisoformat(class_time_str)
-    except Exception:
-        await update.message.reply_text("Invalid class time format; cancellation not confirmed.")
-        return
+    except Exception as exc:  # pragma: no cover - malformed time
+        raise ValueError("Invalid class time format; cancellation not confirmed.") from exc
+
     cancelled_dates = student.setdefault("cancelled_dates", [])
     if class_time_str not in cancelled_dates:
         cancelled_dates.append(class_time_str)
+
     cancel_type = pending_cancel.get("type", "late")
     if cancel_type == "early":
         student["reschedule_credit"] = student.get("reschedule_credit", 0) + 1
@@ -2204,14 +2318,17 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
             f"Cancellation confirmed for {student['name']}. One class deducted."
         )
         log_status = "missed (late cancel)"
+
     student.pop("pending_cancel", None)
     ensure_future_class_dates(student)
     save_students(students)
+
     # remove any scheduled reminder for this class and reschedule remaining
     for job in context.application.job_queue.jobs():
         if job.name == f"class_reminder:{student_key}:{class_time_str}":
             job.schedule_removal()
     schedule_student_reminders(context.application, student_key, student)
+
     logs = load_logs()
     logs.append(
         {
@@ -2222,9 +2339,38 @@ async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_T
         }
     )
     save_logs(logs)
-    await update.message.reply_text(response)
+
     await refresh_student_menu(student_key, student, getattr(context, "bot", None))
     await refresh_student_my_classes(student_key, student, getattr(context, "bot", None))
+
+    return response, class_time_str
+
+
+@admin_only
+async def confirm_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Confirm a student's cancellation request via /confirmcancel."""
+
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /confirmcancel <student_key>")
+        return
+
+    student_key_input = args[0]
+    students = load_students()
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
+        return
+
+    try:
+        response, _ = await confirm_cancel_for_student(
+            context, students, student_key, student
+        )
+    except ValueError as exc:
+        await update.message.reply_text(str(exc))
+        return
+
+    await update.message.reply_text(response)
 
 
 @admin_only
@@ -2934,7 +3080,7 @@ def build_student_classes_text(
         lines = [f"Upcoming classes for {student['name']}:"]
         lines.append("All times shown in Thai time (ICT).")
         for dt in upcoming_list:
-            lines.append(f"  - {fmt_bkk(dt)}")
+            lines.append(f"  - {fmt_bkk(dt, add_label=False)}")
     else:
         lines = ["You have no classes scheduled.", "All times shown in Thai time (ICT)."]
     lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
@@ -2998,7 +3144,7 @@ def build_student_classes_text(
                     else:
                         symbol = "•"
                     dt = entry.get("_parsed_dt")
-                    dt_txt = fmt_bkk(dt) if isinstance(dt, datetime) else entry.get("date", "")
+                    dt_txt = fmt_bkk(dt, add_label=False) if isinstance(dt, datetime) else entry.get("date", "")
                     note = entry.get("note") or ""
                     if note:
                         lines.append(f"{symbol} {dt_txt} – {note}")
