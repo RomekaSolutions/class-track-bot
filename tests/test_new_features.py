@@ -1,8 +1,6 @@
 import types
 import sys
 import os
-import types
-import sys
 from datetime import datetime, timedelta, date, tzinfo
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -295,3 +293,76 @@ def test_confirmcancel_clears_pending_and_refreshes(monkeypatch):
         for row in markup.inline_keyboard
     )
     assert all("Cancellation requested" not in text for _, text, _ in sent)
+
+
+def test_setpremium_toggles_and_persists(monkeypatch):
+    students = {"1": {"name": "A"}}
+    monkeypatch.setattr(ctb, "load_students", lambda: students)
+    monkeypatch.setattr(ctb, "save_students", lambda s: students.update(s))
+
+    replies = []
+
+    class DummyMessage:
+        async def reply_text(self, text):
+            replies.append(text)
+
+    context = types.SimpleNamespace(args=["1", "on"])
+    update = types.SimpleNamespace(
+        message=DummyMessage(),
+        effective_user=types.SimpleNamespace(id=list(ctb.ADMIN_IDS)[0]),
+    )
+    asyncio.run(ctb.set_premium_command(update, context))
+    assert students["1"].get("premium") is True
+    assert any("ENABLED" in r for r in replies)
+
+    context.args = ["1", "off"]
+    asyncio.run(ctb.set_premium_command(update, context))
+    assert students["1"].get("premium") is False
+
+
+def test_build_student_classes_text_premium(monkeypatch):
+    student = {
+        "name": "A",
+        "class_dates": [],
+        "classes_remaining": 0,
+        "renewal_date": "2025-12-31",
+        "premium": True,
+    }
+    text = ctb.build_student_classes_text(student, limit=5)
+    assert "∞" in text
+    assert "Renewal date" not in text
+    assert "Premium member" in text
+
+
+def test_confirm_cancel_premium_vs_regular(monkeypatch):
+    future = datetime(2030, 1, 1, 9, 0, tzinfo=ctb.BKK_TZ).isoformat()
+    premium_student = {
+        "name": "P",
+        "classes_remaining": 5,
+        "pending_cancel": {"class_time": future, "type": "late"},
+        "premium": True,
+        "telegram_id": 1,
+    }
+    regular_student = {
+        "name": "R",
+        "classes_remaining": 5,
+        "pending_cancel": {"class_time": future, "type": "late"},
+        "telegram_id": 2,
+    }
+    students = {"p": premium_student, "r": regular_student}
+    monkeypatch.setattr(ctb, "load_logs", lambda: [])
+    monkeypatch.setattr(ctb, "save_logs", lambda logs: None)
+    monkeypatch.setattr(ctb, "save_students", lambda s: students.update(s))
+    monkeypatch.setattr(ctb, "schedule_student_reminders", lambda app, key, s: None)
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(ctb, "refresh_student_menu", noop)
+    monkeypatch.setattr(ctb, "refresh_student_my_classes", noop)
+
+    context = types.SimpleNamespace(application=types.SimpleNamespace(job_queue=types.SimpleNamespace(jobs=lambda: [])), bot=None)
+    asyncio.run(ctb.confirm_cancel_for_student(context, students, "p", premium_student))
+    asyncio.run(ctb.confirm_cancel_for_student(context, students, "r", regular_student))
+    assert premium_student["classes_remaining"] == 5
+    assert regular_student["classes_remaining"] == 4
