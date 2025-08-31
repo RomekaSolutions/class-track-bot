@@ -103,6 +103,11 @@ else:
     ADMIN_IDS = {123456789}
 
 
+# Simple helper to check admin privileges
+def is_admin(user_id: Optional[int]) -> bool:
+    return user_id in ADMIN_IDS if user_id is not None else False
+
+
 # Debug flag controlling extra diagnostics
 DEBUG_MODE = os.environ.get("CTRACK_DEBUG", "0") == "1"
 
@@ -1820,9 +1825,12 @@ async def dayview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
             ]
         )
-    await update.message.reply_text(
-        "Select a day:", reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    text = "Select a day:"
+    markup = InlineKeyboardMarkup(buttons)
+    if update.message:
+        await update.message.reply_text(text, reply_markup=markup)
+    else:
+        await safe_edit_or_send(update.callback_query, text, reply_markup=markup)
 
 
 @admin_only
@@ -1885,7 +1893,21 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         [InlineKeyboardButton("🕒 Pending Actions", callback_data="admin_pending")]
     ]
     markup = InlineKeyboardMarkup(buttons)
-    await update.message.reply_text(summary, reply_markup=markup)
+    if update.message:
+        await update.message.reply_text(summary, reply_markup=markup)
+    else:
+        await safe_edit_or_send(update.callback_query, summary, reply_markup=markup)
+
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id if update.effective_user else None):
+        return
+    text = "🔧 Admin Menu"
+    kb = build_admin_menu_kb()
+    if update.message:
+        await update.message.reply_text(text, reply_markup=kb)
+    else:
+        await safe_edit_or_send(update.callback_query, text, reply_markup=kb)
 
 
 async def render_admin_pending(target, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1975,6 +1997,48 @@ async def confirm_pending_callback(update: Update, context: ContextTypes.DEFAULT
     await admin_pending_callback(update, context)
 
 
+async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not is_admin(q.from_user.id if q and q.from_user else None):
+        await q.answer("Admins only.", show_alert=True)
+        return
+    action = q.data.split(":", 1)[1]
+
+    try:
+        if action == "dayview":
+            return await dayview_command(update, context)
+        elif action == "dashboard":
+            return await dashboard_command(update, context)
+        elif action == "students":
+            return await edit_command(update, context)
+        elif action == "addstudent":
+            await q.answer()
+            return await safe_edit_or_send(
+                q,
+                "➕ Add Student\nUse the existing /edit flow to add a new student (submenu coming soon).",
+            )
+        elif action == "logs":
+            await q.answer()
+            return await safe_edit_or_send(
+                q,
+                "📂 Logs / Exports\nUse /downloadmonth for now. Menu coming soon.",
+            )
+        elif action == "settings":
+            await q.answer()
+            return await safe_edit_or_send(
+                q,
+                "⚙️ Settings\nQuick toggles coming soon.",
+            )
+        elif action == "root":
+            return await admin_command(update, context)
+        else:
+            await q.answer("Unknown admin action.", show_alert=False)
+            return
+    except Exception:
+        logging.exception("ADMIN MENU ACTION CRASH action=%s", action)
+        await safe_edit_or_send(q, "Temporary issue opening that admin view.")
+
+
 async def log_unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log any unrecognised callback data for diagnostics."""
 
@@ -2028,11 +2092,17 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             label += f" @{handle}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"edit:pick:{key}")])
     if not buttons:
-        await update.message.reply_text("No active students found.")
+        if update.message:
+            await update.message.reply_text("No active students found.")
+        else:
+            await safe_edit_or_send(update.callback_query, "No active students found.")
         return
-    await update.message.reply_text(
-        "Select a student to edit:", reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    text = "Select a student to edit:"
+    markup = InlineKeyboardMarkup(buttons)
+    if update.message:
+        await update.message.reply_text(text, reply_markup=markup)
+    else:
+        await safe_edit_or_send(update.callback_query, text, reply_markup=markup)
 
 
 @admin_only
@@ -2885,6 +2955,24 @@ async def nukepending_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 # -----------------------------------------------------------------------------
 # Student interface handlers
 # -----------------------------------------------------------------------------
+
+
+def build_admin_menu_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton("📅 Day View", callback_data="admin:dayview"),
+            InlineKeyboardButton("📊 Dashboard", callback_data="admin:dashboard"),
+        ],
+        [
+            InlineKeyboardButton("👥 Students", callback_data="admin:students"),
+            InlineKeyboardButton("➕ Add Student", callback_data="admin:addstudent"),
+        ],
+        [
+            InlineKeyboardButton("📂 Logs / Exports", callback_data="admin:logs"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="admin:settings"),
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
@@ -3805,6 +3893,7 @@ def main() -> None:
     application.add_handler(CommandHandler("removestudent", remove_student_command))
     application.add_handler(CommandHandler("viewstudent", view_student))
     application.add_handler(CommandHandler("dayview", dayview_command))
+    application.add_handler(CommandHandler("admin", admin_command))
 
     # Student handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -3815,6 +3904,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_time_slot_callback, pattern="^edit:time:slot:"))
     application.add_handler(CallbackQueryHandler(edit_time_scope_callback, pattern="^edit:time:scope:"))
     application.add_handler(CallbackQueryHandler(edit_time_oncepick_callback, pattern="^edit:time:oncepick:"))
+    application.add_handler(CallbackQueryHandler(admin_menu_callback, pattern=r"^admin:"))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:"))
     application.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern="^admin_cancel_sel:"))
     application.add_handler(CallbackQueryHandler(debug_ping_callback, pattern="^__ping__$"))
