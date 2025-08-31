@@ -1839,42 +1839,37 @@ async def render_admin_pending(target, context: ContextTypes.DEFAULT_TYPE) -> No
     pending_items: List[Tuple[str, Dict[str, Any]]] = [
         (sid, s) for sid, s in students.items() if s.get("pending_cancel")
     ]
-    lines: List[str] = []
+
+    lines: List[str] = [f"Pending cancels: {len(pending_items)}"]
     buttons: List[List[InlineKeyboardButton]] = []
 
-    if pending_items:
-        lines.append("🕒 Pending cancellations:")
-        lines.append("")
-        for sid, student in pending_items:
-            pending = student.get("pending_cancel", {})
-            class_time = pending.get("class_time")
-            try:
-                dt = ensure_bangkok(class_time)
-                class_str = fmt_bkk(dt, add_label=False)
-            except Exception:
-                logging.warning("Bad pending_cancel datetime for %s: %s", sid, pending)
-                continue
-            cancel_type = pending.get("type")
-            type_str = f" ({cancel_type})" if cancel_type else ""
-            handle = student.get("telegram_handle")
-            display = student.get("name", sid)
-            if handle:
-                display += f" @{normalize_handle(handle)}"
-            lines.append(f"- {display} — {class_str}{type_str}")
+    for sid, student in pending_items:
+        pending = student.get("pending_cancel")
+        class_time = pending.get("class_time") if pending else None
+        try:
+            dt = ensure_bangkok(class_time)
+            class_str = fmt_bkk(dt, add_label=False)
+        except Exception:
+            logging.warning(
+                "Bad pending_cancel for %s: %s", sid, student.get("pending_cancel")
+            )
+            continue
+        handle = student.get("telegram_handle")
+        name = student.get("name", sid)
+        display = name
+        if handle:
+            display += f" (@{normalize_handle(handle)})"
+        cancel_type = pending.get("type") if pending else None
+        type_suffix = f" {cancel_type}" if cancel_type else ""
+        lines.append(f"• {display} — {class_str}{type_suffix}")
 
-            short_name = (
-                f"@{normalize_handle(handle)}" if handle else student.get("name", "").split()[0]
-            )
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        f"✅ Confirm — {short_name}",
-                        callback_data=f"confirm_pending:{sid}",
-                    )
-                ]
-            )
-    else:
-        lines.append("No pending actions ✅")
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    f"✅ Confirm — {name}", callback_data=f"confirm_pending:{sid}"
+                )
+            ]
+        )
 
     buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")])
     text = "\n".join(lines)
@@ -1893,7 +1888,10 @@ async def admin_pending_callback(update: Update, context: ContextTypes.DEFAULT_T
     """Handle callback for pending actions list."""
 
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     await render_admin_pending(query, context)
 
 
@@ -1902,39 +1900,38 @@ async def confirm_pending_callback(update: Update, context: ContextTypes.DEFAULT
     """One-tap confirmation of pending cancellations."""
 
     query = update.callback_query
-    await query.answer()
     student_id = query.data.split(":", 1)[1]
     students = load_students()
     student = students.get(student_id)
     if not student or not student.get("pending_cancel"):
-        await query.message.reply_text("Pending item not found.")
-        await render_admin_pending(query, context)
+        await query.answer("Nothing pending for this student.", show_alert=True)
+        await admin_pending_callback(update, context)
         return
 
     try:
-        response, class_time_str = await confirm_cancel_for_student(
-            context, students, student_id, student
-        )
+        await confirm_cancel_for_student(context, students, student_id, student)
     except ValueError as exc:
-        await query.message.reply_text(str(exc))
-        await render_admin_pending(query, context)
+        await query.answer(str(exc), show_alert=True)
+        await admin_pending_callback(update, context)
         return
 
+    await query.answer("Cancel confirmed.")
+    await admin_pending_callback(update, context)
+
+
+async def log_unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log any unrecognised callback data for diagnostics."""
+
+    query = update.callback_query
+    logging.warning(
+        "UNKNOWN CALLBACK data=%s user=%s",
+        getattr(query, "data", None),
+        getattr(getattr(query, "from_user", None), "id", None),
+    )
     try:
-        dt = ensure_bangkok(class_time_str)
-        class_txt = fmt_bkk(dt, add_label=False)
+        await query.answer("Unknown action.", show_alert=False)
     except Exception:
-        class_txt = class_time_str
-
-    handle = student.get("telegram_handle")
-    display = f"@{normalize_handle(handle)}" if handle else student.get("name")
-    msg = f"Confirmed cancel for {display} on {class_txt}."
-    try:
-        await query.message.reply_text(msg)
-    except BadRequest:
-        await safe_edit_or_send(query, msg)
-
-    await render_admin_pending(query, context)
+        pass
 
 
 @admin_only
@@ -3015,6 +3012,14 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
         if not student and user.username:
             student_key, student = resolve_student(students, user.username)
         if not student:
+            user_id = user.id if user else None
+            if user_id in ADMIN_IDS:
+                summary = generate_dashboard_summary()
+                kb = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🕒 Pending Actions", callback_data="admin_pending")]]
+                )
+                await safe_edit_or_send(query, summary, reply_markup=kb)
+                return
             logging.warning(
                 "student_button_handler unresolved student",
                 extra={
@@ -3738,7 +3743,17 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:"))
     application.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern="^admin_cancel_sel:"))
     application.add_handler(CallbackQueryHandler(debug_ping_callback, pattern="^__ping__$"))
-    application.add_handler(CallbackQueryHandler(student_button_handler))
+    application.add_handler(CallbackQueryHandler(admin_pending_callback, pattern=r"^admin_pending$"))
+    application.add_handler(
+        CallbackQueryHandler(confirm_pending_callback, pattern=r"^confirm_pending:(\d+)$")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            student_button_handler,
+            pattern=r"^(my_classes|cancel_class|free_credit|cancel_withdraw|cancel_dismiss|back_to_start)$",
+        )
+    )
+    application.add_handler(CallbackQueryHandler(log_unknown_callback, pattern=r".*"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # Ensure schedules extend into the future and reminders are set
     students = load_students()
