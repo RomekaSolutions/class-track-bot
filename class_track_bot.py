@@ -2548,6 +2548,57 @@ async def datacheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+def check_log_students(
+    students: Dict[str, Any], logs: List[Dict[str, Any]]
+) -> Tuple[int, int, int, List[str]]:
+    """Return statistics on log entries matching known students."""
+
+    total = len(logs)
+    matched = 0
+    unmatched = 0
+    samples: List[str] = []
+
+    for entry in logs:
+        student_field = entry.get("student")
+        normalized = normalize_handle(str(student_field))
+        canonical, _ = resolve_student(students, normalized)
+        if canonical is not None:
+            matched += 1
+        else:
+            unmatched += 1
+            if len(samples) < 10:
+                samples.append(str(student_field))
+
+    return total, matched, unmatched, samples
+
+
+@admin_only
+async def checklogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    students = load_students()
+    logs = load_logs()
+    total, matched, unmatched, samples = check_log_students(students, logs)
+
+    if unmatched:
+        sample_text = ", ".join(samples)
+        message = (
+            "📝 Log Check:\n"
+            f"Total logs: {total}\n"
+            f"Matched: {matched}\n"
+            f"Unmatched: {unmatched}\n"
+            f"Sample bad keys: {sample_text}"
+        )
+    else:
+        message = (
+            "📝 Log Check:\n"
+            f"Total logs: {total}\n"
+            f"Matched: {matched}\n"
+            f"Unmatched: {unmatched}\n"
+            "No problems found ✅"
+        )
+
+    await update.message.reply_text(message)
+
+
 @admin_only
 async def nukepending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args or context.args[0].lower() != "confirm":
@@ -3450,6 +3501,7 @@ def main() -> None:
     application.add_handler(CommandHandler("downloadmonth", download_month_command))
     application.add_handler(CommandHandler("selftest", selftest_command))
     application.add_handler(CommandHandler("datacheck", datacheck_command))
+    application.add_handler(CommandHandler("checklogs", checklogs_command))
     application.add_handler(CommandHandler("nukepending", nukepending_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
