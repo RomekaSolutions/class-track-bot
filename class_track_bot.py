@@ -2067,61 +2067,207 @@ async def admin_pick_student_callback(update, context):
     if not student:
         await q.answer("Student not found.", show_alert=True)
         return await admin_students_page_callback(update, context)
+    context.user_data["admin_selected_student_id"] = student_id
     nameline = display_name(student_id, student)
     text = f"👤 {nameline}\nChoose an action:"
     kb = build_student_submenu_kb(student_id)
     await safe_edit_or_send(q, text, reply_markup=kb)
 
 
+async def admin_view_for_student(student_id: str, query, context):
+    students = load_students()
+    student = students.get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    text, markup = build_student_detail_view(student_id, student)
+    return await safe_edit_or_send(query, text, reply_markup=markup)
+
+
+async def admin_logclass_for_student(student_id: str, query, context):
+    student = load_students().get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    return await initiate_log_class(query, context, student_id, student)
+
+
+async def admin_cancel_for_student(student_id: str, query, context):
+    student = load_students().get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    return await initiate_cancel_class_admin(query, context, student_id, student)
+
+
+async def admin_renew_for_student(student_id: str, query, context):
+    student = load_students().get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    return await initiate_renew_student(query, context, student_id, student)
+
+
+async def admin_free_for_student(student_id: str, query, context):
+    student = load_students().get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    return await initiate_award_free(query, context, student_id, student)
+
+
+async def admin_resched_for_student(student_id: str, query, context):
+    student = load_students().get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    return await initiate_reschedule_student(query, context, student_id, student)
+
+
+async def admin_length_for_student(student_id: str, query, context):
+    student = load_students().get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    return await initiate_change_length(query, context, student_id, student)
+
+
+async def admin_schedule_for_student(student_id: str, query, context):
+    student = load_students().get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    return await initiate_edit_schedule(query, context, student_id, student)
+
+
+async def admin_pause_for_student(student_id: str, query, context):
+    student = load_students().get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    return await initiate_pause_toggle(query, context, student_id, student)
+
+
+async def admin_remove_for_student(student_id: str, query, context):
+    student = load_students().get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+    return await initiate_remove_student(query, context, student_id, student)
+
+
 async def admin_student_action_callback(update, context):
     q = update.callback_query
     if not is_admin(q.from_user.id):
         return await q.answer("Admins only.", show_alert=True)
-    _, _, student_id, action = q.data.split(":", 3)
-    context.user_data["admin_selected_student_id"] = student_id
+    data_parts = q.data.split(":", 3)
+    student_id = data_parts[2] if len(data_parts) > 2 else ""
+    action = q.data.rsplit(":", 1)[-1]
+    students = load_students()
+    if not student_id or student_id not in students:
+        await safe_edit_or_send(q, "Student not found.")
+        return await admin_students_page_callback(update, context)
     try:
         if action == "view":
-            context.args = [student_id]
-            return await view_student(update, context)
-        elif action == "cancel":
-            context.args = [student_id]
-            return await cancel_class_command(update, context)
+            return await admin_view_for_student(student_id, q, context)
         elif action == "log":
-            context.args = [student_id]
-            return await log_class_command(update, context)
+            return await admin_logclass_for_student(student_id, q, context)
+        elif action == "cancel":
+            return await admin_cancel_for_student(student_id, q, context)
+        elif action == "renew":
+            return await admin_renew_for_student(student_id, q, context)
         elif action == "free":
-            context.args = [student_id]
-            return await award_free_command(update, context)
+            return await admin_free_for_student(student_id, q, context)
+        elif action == "resched":
+            return await admin_resched_for_student(student_id, q, context)
+        elif action == "length":
+            return await admin_length_for_student(student_id, q, context)
+        elif action == "schedule":
+            return await admin_schedule_for_student(student_id, q, context)
         elif action == "pause":
-            context.args = [student_id]
-            return await pause_student_command(update, context)
+            return await admin_pause_for_student(student_id, q, context)
         elif action == "remove":
-            context.args = [student_id]
-            return await remove_student_command(update, context)
-        elif action in {"renew", "resched", "length", "schedule"}:
-            pass
+            return await admin_remove_for_student(student_id, q, context)
     except Exception:
         logging.exception(
             "ADMIN STUDENT ACTION CRASH sid=%s action=%s", student_id, action
         )
         return await safe_edit_or_send(q, "Temporary issue handling that action.")
 
-    hints = {
-        "log": "Use /logclass",
-        "cancel": "Use /cancelclass",
-        "resched": "Use /reschedulestudent",
-        "renew": "Use /renewstudent",
-        "length": "Use /edit to change length",
-        "schedule": "Use /edit to change schedule",
-        "free": "Use /awardfree",
-        "pause": "Use /pause",
-        "remove": "Use /removestudent",
-        "view": "Use /viewstudent",
-    }
-    await q.answer()
+
+async def initiate_log_class(query, context, student_id, student):
     return await safe_edit_or_send(
-        q, f"{hints.get(action, 'Action coming soon.')} (submenu wiring step 3)"
+        query, "Logging flow not yet implemented for this student."
     )
+
+
+async def initiate_cancel_class_admin(query, context, student_id, student):
+    upcoming_list = get_upcoming_classes(student, count=8)
+    if not upcoming_list:
+        return await safe_edit_or_send(query, "No upcoming classes to cancel.")
+    context.user_data["admin_cancel"] = {
+        "student_key": student_id,
+        "late": False,
+        "note": "",
+    }
+    buttons = []
+    for idx, dt in enumerate(upcoming_list):
+        label = dt.strftime("%a %d %b %H:%M")
+        buttons.append([
+            InlineKeyboardButton(label, callback_data=f"admin_cancel_sel:{idx}")
+        ])
+    kb = InlineKeyboardMarkup(buttons)
+    return await safe_edit_or_send(query, "Select class to cancel:", reply_markup=kb)
+
+
+async def initiate_renew_student(query, context, student_id, student):
+    return await safe_edit_or_send(query, "Renewal flow not yet implemented.")
+
+
+async def initiate_award_free(query, context, student_id, student):
+    students = load_students()
+    s = students.get(student_id)
+    if not s:
+        return await safe_edit_or_send(query, "Student not found.")
+    if is_premium(s):
+        return await safe_edit_or_send(
+            query, f"Note: {s['name']} is Premium; award/renew not required."
+        )
+    s["free_class_credit"] = s.get("free_class_credit", 0) + 1
+    save_students(students)
+    logs = load_logs()
+    logs.append(
+        {
+            "student": student_id,
+            "date": datetime.now(student_timezone(s)).isoformat(),
+            "status": "free_credit_awarded",
+            "note": "admin award free credit",
+        }
+    )
+    save_logs(logs)
+    return await safe_edit_or_send(
+        query,
+        f"Awarded a free class credit to {s['name']}. They now have {s['free_class_credit']} free credit(s).",
+    )
+
+
+async def initiate_reschedule_student(query, context, student_id, student):
+    return await safe_edit_or_send(query, "Reschedule flow not yet implemented.")
+
+
+async def initiate_change_length(query, context, student_id, student):
+    return await safe_edit_or_send(query, "Change length flow not yet implemented.")
+
+
+async def initiate_edit_schedule(query, context, student_id, student):
+    return await safe_edit_or_send(query, "Edit schedule flow not yet implemented.")
+
+
+async def initiate_pause_toggle(query, context, student_id, student):
+    students = load_students()
+    s = students.get(student_id)
+    if not s:
+        return await safe_edit_or_send(query, "Student not found.")
+    s["paused"] = not s.get("paused", False)
+    save_students(students)
+    state = "paused" if s["paused"] else "resumed"
+    return await safe_edit_or_send(
+        query, f"{s.get('name', student_id)} has been {state}."
+    )
+
+
+async def initiate_remove_student(query, context, student_id, student):
+    return await safe_edit_or_send(query, "Removal flow not yet implemented.")
 
 
 async def log_unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3149,6 +3295,22 @@ def build_student_submenu_kb(student_id: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("⬅️ Back to Students", callback_data="admin:students")],
         ]
     )
+
+
+def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
+    schedule = get_upcoming_classes(student, count=len(student.get("class_dates", [])))
+    lines = [f"Student: {student.get('name', student_id)}"]
+    lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
+    if schedule:
+        lines.append("Schedule:")
+        for dt in schedule:
+            lines.append(f"  - {dt.strftime('%a %d %b %H:%M')}")
+    else:
+        lines.append("Schedule: None")
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⬅️ Back", callback_data=f"admin:pick:{student_id}")]]
+    )
+    return "\n".join(lines), kb
 
 
 def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
