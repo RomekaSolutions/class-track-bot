@@ -2929,23 +2929,40 @@ def build_student_classes_text(
                 or normalize_handle(str(entry_key)) == normalize_handle(str(target_key))
             )
 
-        student_logs = [e for e in logs if _matches(e.get("student"), student_key)]
-
-        def _parse_entry_dt(entry: Dict[str, Any]) -> datetime:
-            dt_str = entry.get("date", "")
+        student_logs: List[Dict[str, Any]] = []
+        for entry in logs:
             try:
-                return datetime.fromisoformat(dt_str)
-            except Exception:
+                if not _matches(entry.get("student"), student_key):
+                    logging.debug(
+                        "LOG ENTRY student mismatch: expected=%s entry=%s",
+                        student_key,
+                        entry,
+                    )
+                    continue
+                dt_str = entry.get("date", "")
                 try:
-                    return datetime.fromisoformat(dt_str + "T00:00")
+                    parsed_dt = datetime.fromisoformat(dt_str)
                 except Exception:
-                    return datetime.min
+                    try:
+                        parsed_dt = datetime.fromisoformat(dt_str + "T00:00")
+                    except Exception:
+                        logging.warning(
+                            "LOG DATE PARSE FAIL for student=%s entry=%s",
+                            student_key,
+                            entry,
+                        )
+                        parsed_dt = datetime.min
+                entry["_parsed_dt"] = parsed_dt
+                student_logs.append(entry)
+            except Exception:
+                logging.exception("BAD LOG ENTRY skipped: %s", entry)
+                continue
 
-        student_logs.sort(key=_parse_entry_dt, reverse=True)
+        student_logs.sort(key=lambda e: e.get("_parsed_dt", datetime.min), reverse=True)
         recent_logs = student_logs[:2]
+        lines.append("")
+        lines.append("Recent classes:")
         if recent_logs:
-            lines.append("")
-            lines.append("Recent classes:")
             tz = student_timezone(student)
             for entry in recent_logs:
                 try:
@@ -2959,11 +2976,12 @@ def build_student_classes_text(
                     else:
                         symbol = "•"
                     dt_txt = entry.get("date", "")
+                    dt = entry.get("_parsed_dt")
                     try:
-                        dt = datetime.fromisoformat(dt_txt)
-                        if dt.tzinfo is None:
-                            dt = safe_localize(tz, dt)
-                        dt_txt = dt.astimezone(tz).strftime("%Y-%m-%d")
+                        if isinstance(dt, datetime):
+                            if dt.tzinfo is None:
+                                dt = safe_localize(tz, dt)
+                            dt_txt = dt.astimezone(tz).strftime("%Y-%m-%d")
                     except Exception:
                         pass
                     note = entry.get("note") or ""
@@ -2972,7 +2990,10 @@ def build_student_classes_text(
                     else:
                         lines.append(f"{symbol} {dt_txt}")
                 except Exception:
+                    logging.exception("BAD LOG ENTRY skipped: %s", entry)
                     continue
+        else:
+            lines.append("(No recent logs)")
 
     return "\n".join(lines)
 
