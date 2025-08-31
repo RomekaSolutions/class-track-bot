@@ -2600,6 +2600,41 @@ async def checklogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 @admin_only
+async def fixlogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    students = load_students()
+    logs = load_logs()
+    total = len(logs)
+    cleaned: List[Dict[str, Any]] = []
+    rewritten = 0
+    dropped = 0
+    for entry in logs:
+        student_field = entry.get("student")
+        if student_field is None:
+            dropped += 1
+            continue
+        _, student = resolve_student(students, str(student_field))
+        if student and student.get("telegram_id") is not None:
+            canonical = str(student["telegram_id"])
+            if entry.get("student") != canonical:
+                entry["student"] = canonical
+                rewritten += 1
+            cleaned.append(entry)
+        else:
+            dropped += 1
+    save_logs(cleaned)
+    if rewritten or dropped:
+        message = (
+            "🛠 FixLogs:\n"
+            f"Total logs processed: {total}\n"
+            f"Rewritten: {rewritten}\n"
+            f"Dropped: {dropped}"
+        )
+    else:
+        message = "🛠 FixLogs:\nAll logs already clean ✅"
+    await update.message.reply_text(message)
+
+
+@admin_only
 async def nukepending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args or context.args[0].lower() != "confirm":
         await update.message.reply_text("Usage: /nukepending confirm")
@@ -3502,6 +3537,7 @@ def main() -> None:
     application.add_handler(CommandHandler("selftest", selftest_command))
     application.add_handler(CommandHandler("datacheck", datacheck_command))
     application.add_handler(CommandHandler("checklogs", checklogs_command))
+    application.add_handler(CommandHandler("fixlogs", fixlogs_command))
     application.add_handler(CommandHandler("nukepending", nukepending_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
