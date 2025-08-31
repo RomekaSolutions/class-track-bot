@@ -85,19 +85,18 @@ def test_set_class_length_and_slot_durations():
 
 
 def test_reschedule_and_cancel_single_class(monkeypatch):
-    tz = ctb.BASE_TZ
-    old_dt = tz.localize(datetime(2025, 1, 5, 10, 0))
-    new_dt = tz.localize(datetime(2025, 1, 6, 11, 0))
+    old_dt = datetime(2025, 1, 5, 10, 0, tzinfo=ctb.BKK_TZ)
+    new_dt = datetime(2025, 1, 6, 11, 0, tzinfo=ctb.BKK_TZ)
     student = {"class_dates": [old_dt.isoformat()], "cancelled_dates": []}
     calls = []
     monkeypatch.setattr(ctb, "schedule_student_reminders", lambda app, key, s: calls.append(key))
-    now = tz.localize(datetime(2025, 1, 1, 0, 0))
+    now = datetime(2025, 1, 1, 0, 0, tzinfo=ctb.BKK_TZ)
     ctb.reschedule_single_class("1", student, old_dt.isoformat(), new_dt.isoformat(), now=now, application=object(), log=False)
     assert old_dt.isoformat() not in student["class_dates"]
     assert new_dt.isoformat() in student["class_dates"]
     assert calls == ["1"]
     # time-only reschedule
-    another_old = tz.localize(datetime(2025, 1, 8, 10, 0))
+    another_old = datetime(2025, 1, 8, 10, 0, tzinfo=ctb.BKK_TZ)
     student["class_dates"] = [another_old.isoformat()]
     ctb.reschedule_single_class("1", student, another_old.isoformat(), "12:30", now=now, application=object(), log=False)
     assert any("12:30" in d for d in student["class_dates"])
@@ -107,7 +106,7 @@ def test_reschedule_and_cancel_single_class(monkeypatch):
     assert new_dt.isoformat() in student["cancelled_dates"]
     assert student["reschedule_credit"] == 1
     # cancel late
-    later_dt = tz.localize(datetime(2025, 1, 7, 11, 0))
+    later_dt = datetime(2025, 1, 7, 11, 0, tzinfo=ctb.BKK_TZ)
     student["class_dates"].append(later_dt.isoformat())
     student["cancelled_dates"].clear()
     ctb.cancel_single_class("1", student, later_dt.isoformat(), grant_credit=False, application=object(), log=False)
@@ -117,8 +116,7 @@ def test_reschedule_and_cancel_single_class(monkeypatch):
 
 
 def test_start_and_buttons(monkeypatch):
-    tz = ctb.BASE_TZ
-    start_dt = tz.localize(datetime(2025, 1, 10, 9, 0))
+    start_dt = datetime(2025, 1, 10, 9, 0, tzinfo=ctb.BKK_TZ)
     student = {
         "name": "A",
         "class_dates": [start_dt.isoformat()],
@@ -158,8 +156,7 @@ def test_start_and_buttons(monkeypatch):
 
 
 def test_pending_cancel_banner_withdraw_and_dismiss(monkeypatch):
-    tz = ctb.BASE_TZ
-    future_dt = tz.localize(datetime(2030, 1, 10, 9, 0))
+    future_dt = datetime(2030, 1, 10, 9, 0, tzinfo=ctb.BKK_TZ)
     student = {
         "name": "A",
         "class_dates": [future_dt.isoformat()],
@@ -214,9 +211,8 @@ def test_pending_cancel_banner_withdraw_and_dismiss(monkeypatch):
 
 
 def test_cancel_replaces_pending(monkeypatch):
-    tz = ctb.BASE_TZ
-    dt1 = tz.localize(datetime(2030, 1, 5, 10, 0))
-    dt2 = tz.localize(datetime(2030, 1, 6, 11, 0))
+    dt1 = datetime(2030, 1, 5, 10, 0, tzinfo=ctb.BKK_TZ)
+    dt2 = datetime(2030, 1, 6, 11, 0, tzinfo=ctb.BKK_TZ)
     student = {
         "name": "A",
         "class_dates": [dt1.isoformat(), dt2.isoformat()],
@@ -251,8 +247,7 @@ def test_cancel_replaces_pending(monkeypatch):
 
 
 def test_confirmcancel_clears_pending_and_refreshes(monkeypatch):
-    tz = ctb.BASE_TZ
-    future_dt = tz.localize(datetime(2030, 2, 1, 9, 0))
+    future_dt = datetime(2030, 2, 1, 9, 0, tzinfo=ctb.BKK_TZ)
     student = {
         "name": "A",
         "telegram_id": 10,
