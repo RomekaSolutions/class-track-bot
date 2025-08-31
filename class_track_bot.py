@@ -40,7 +40,7 @@ import json
 import logging
 import os
 import inspect
-from datetime import datetime, timedelta, time, date
+from datetime import datetime, timedelta, time, date, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
 from telegram import (
@@ -121,6 +121,38 @@ DEFAULT_REMINDER_OFFSET = timedelta(hours=1)
 # Base timezone for all operations (Bangkok time)
 BASE_TZ = pytz.timezone("Asia/Bangkok")
 
+# Simple fixed Bangkok timezone using standard library
+BKK_TZ = timezone(timedelta(hours=7))  # Asia/Bangkok, simple/fixed
+
+
+def ensure_bangkok(dt_or_str):
+    """
+    Accepts datetime or ISO string and returns tz-aware datetime in Bangkok.
+    If string, parses with datetime.fromisoformat (handles '+07:00').
+    Naive datetimes are localized to Bangkok; aware datetimes are converted.
+    """
+    if isinstance(dt_or_str, str):
+        dt = datetime.fromisoformat(dt_or_str)
+    else:
+        dt = dt_or_str
+    if dt.tzinfo is None:
+        logging.warning("Localized naive datetime to Bangkok: %s", dt_or_str)
+        dt = dt.replace(tzinfo=BKK_TZ)
+    else:
+        dt = dt.astimezone(BKK_TZ)
+    return dt
+
+
+def bkk_min():
+    """Return minimal aware datetime in Bangkok."""
+    return datetime.min.replace(tzinfo=BKK_TZ)
+
+
+def fmt_bkk(dt):
+    """Format datetime for human display in Bangkok timezone."""
+    dt = ensure_bangkok(dt)
+    return dt.strftime("%a %d %b %H:%M") + " ICT"
+
 # Weekday helpers used throughout scheduling utilities
 WEEKDAY_NAMES = [
     "Monday",
@@ -153,15 +185,13 @@ def safe_localize(tz: pytz.timezone, naive_dt: datetime) -> datetime:
 
 
 def parse_student_datetime(dt_str: str, student: Dict[str, Any]) -> datetime:
-    """Parse ``dt_str`` and return an aware datetime in the base timezone."""
+    """Parse ``dt_str`` and return a Bangkok-aware datetime."""
     dt_str = dt_str.replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(dt_str)
     except ValueError as e:
         raise ValueError(f"Invalid datetime: {dt_str}") from e
-    if dt.tzinfo is None:
-        dt = safe_localize(student_timezone(student), dt)
-    return dt
+    return ensure_bangkok(dt)
 
 
 def normalize_handle(handle: Optional[str]) -> str:
@@ -534,8 +564,7 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
     This function converts them to aware ``datetime`` objects, filters out
     past or cancelled classes and returns the next ``count`` items.
     """
-    tz = student_timezone(student)
-    now = datetime.now(tz)
+    now = ensure_bangkok(datetime.now())
     cancelled = set(student.get("cancelled_dates", []))
     renewal_date = None
     renewal_str = student.get("renewal_date")
@@ -547,10 +576,10 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
     results: List[datetime] = []
     for item in student.get("class_dates", []):
         try:
-            dt = datetime.fromisoformat(item)
+            dt = ensure_bangkok(item)
         except Exception:
             try:
-                dt = safe_localize(tz, datetime.strptime(item, "%Y-%m-%d %H:%M"))
+                dt = ensure_bangkok(datetime.strptime(item, "%Y-%m-%d %H:%M"))
             except Exception:
                 continue
         if dt <= now:
@@ -579,12 +608,10 @@ async def send_class_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not chat_id:
         return
     try:
-        class_dt = datetime.fromisoformat(class_dt_str)
+        class_dt = ensure_bangkok(class_dt_str)
     except Exception:
         return
-    tz = student_timezone(student)
-    local_dt = class_dt.astimezone(tz)
-    msg = f"Reminder: you have a class at {local_dt.strftime('%Y-%m-%d %H:%M %Z')}"
+    msg = f"Reminder: you have a class at {fmt_bkk(class_dt)}"
     try:
         await getattr(context, "bot", None).send_message(chat_id=chat_id, text=msg)
     except Exception:
@@ -598,10 +625,9 @@ def schedule_class_reminder(
     class_dt_str: str,
     reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
 ) -> None:
-    tz = student_timezone(student)
-    now = datetime.now(tz)
+    now = ensure_bangkok(datetime.now())
     try:
-        class_dt = datetime.fromisoformat(class_dt_str)
+        class_dt = ensure_bangkok(class_dt_str)
     except Exception:
         return
     run_time = class_dt - reminder_offset
@@ -639,8 +665,7 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
     """Ensure class_dates extend at least ``horizon_weeks`` into the future."""
     if horizon_weeks is None:
         horizon_weeks = student.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
-    tz = student_timezone(student)
-    now = datetime.now(tz)
+    now = ensure_bangkok(datetime.now())
     class_dates = student.get("class_dates", [])
     original_len = len(class_dates)
 
@@ -655,7 +680,7 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
     parsed: List[datetime] = []
     for item in class_dates:
         try:
-            dt = datetime.fromisoformat(item)
+            dt = ensure_bangkok(item)
         except Exception:
             continue
         if renewal_date and dt.date() > renewal_date:
@@ -675,7 +700,7 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
                 cycle_weeks=horizon_weeks,
             )
             for dt_str in new_dates:
-                dt = datetime.fromisoformat(dt_str)
+                dt = ensure_bangkok(dt_str)
                 if latest and dt <= latest:
                     continue
                 if renewal_date and dt.date() > renewal_date:
@@ -695,15 +720,14 @@ def regenerate_future_class_dates(student: Dict[str, Any], *, now: Optional[date
     ``renewal_date`` (if any).  ``class_dates`` remain sorted and
     de-duplicated and cancelled dates are skipped.
     """
-    tz = student_timezone(student)
     if now is None:
-        now = datetime.now(tz)
+        now = ensure_bangkok(datetime.now())
     pattern = student.get("schedule_pattern", "")
     entries = [e.strip() for e in pattern.split(",") if e.strip()]
     past: List[datetime] = []
     for item in student.get("class_dates", []):
         try:
-            dt = datetime.fromisoformat(item)
+            dt = ensure_bangkok(item)
         except Exception:
             continue
         if dt <= now:
@@ -722,7 +746,7 @@ def regenerate_future_class_dates(student: Dict[str, Any], *, now: Optional[date
         cancelled = set(student.get("cancelled_dates", []))
         for dt_str in gen:
             try:
-                dt = datetime.fromisoformat(dt_str)
+                dt = ensure_bangkok(dt_str)
             except Exception:
                 continue
             if dt <= now:
@@ -2659,9 +2683,7 @@ async def nukepending_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
     """Return the welcome text and keyboard for a student."""
     upcoming = get_upcoming_classes(student, count=1)
-    next_class_str = (
-        upcoming[0].strftime("%A %d %b %Y at %H:%M") if upcoming else "No upcoming classes set"
-    )
+    next_class_str = fmt_bkk(upcoming[0]) if upcoming else "No upcoming classes set"
     classes_remaining = student.get("classes_remaining", 0)
     renewal = student.get("renewal_date", "N/A")
     lines = [
@@ -2909,11 +2931,12 @@ def build_student_classes_text(
     limit = max(1, min(20, limit))
     upcoming_list = get_upcoming_classes(student, count=limit)
     if upcoming_list:
-        lines = [f"Upcoming classes for {student['name']}:\n"]
+        lines = [f"Upcoming classes for {student['name']}:"]
+        lines.append("All times shown in Thai time (ICT).")
         for dt in upcoming_list:
-            lines.append(f"  - {dt.strftime('%A %d %b %Y at %H:%M')}")
+            lines.append(f"  - {fmt_bkk(dt)}")
     else:
-        lines = ["You have no classes scheduled."]
+        lines = ["You have no classes scheduled.", "All times shown in Thai time (ICT)."]
     lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
     lines.append(f"Renewal date: {student.get('renewal_date', 'N/A')}")
     if student.get("paused"):
@@ -2941,29 +2964,28 @@ def build_student_classes_text(
                     continue
                 dt_str = entry.get("date", "")
                 try:
-                    parsed_dt = datetime.fromisoformat(dt_str)
+                    parsed_dt = ensure_bangkok(dt_str)
                 except Exception:
                     try:
-                        parsed_dt = datetime.fromisoformat(dt_str + "T00:00")
+                        parsed_dt = ensure_bangkok(dt_str + "T00:00")
                     except Exception:
                         logging.warning(
                             "LOG DATE PARSE FAIL for student=%s entry=%s",
                             student_key,
                             entry,
                         )
-                        parsed_dt = datetime.min
+                        parsed_dt = bkk_min()
                 entry["_parsed_dt"] = parsed_dt
                 student_logs.append(entry)
             except Exception:
                 logging.exception("BAD LOG ENTRY skipped: %s", entry)
                 continue
 
-        student_logs.sort(key=lambda e: e.get("_parsed_dt", datetime.min), reverse=True)
+        student_logs.sort(key=lambda e: e.get("_parsed_dt", bkk_min()), reverse=True)
         recent_logs = student_logs[:2]
         lines.append("")
         lines.append("Recent classes:")
         if recent_logs:
-            tz = student_timezone(student)
             for entry in recent_logs:
                 try:
                     status = (entry.get("status") or "").lower()
@@ -2975,15 +2997,8 @@ def build_student_classes_text(
                         symbol = "❌"
                     else:
                         symbol = "•"
-                    dt_txt = entry.get("date", "")
                     dt = entry.get("_parsed_dt")
-                    try:
-                        if isinstance(dt, datetime):
-                            if dt.tzinfo is None:
-                                dt = safe_localize(tz, dt)
-                            dt_txt = dt.astimezone(tz).strftime("%Y-%m-%d")
-                    except Exception:
-                        pass
+                    dt_txt = fmt_bkk(dt) if isinstance(dt, datetime) else entry.get("date", "")
                     note = entry.get("note") or ""
                     if note:
                         lines.append(f"{symbol} {dt_txt} – {note}")
@@ -3017,9 +3032,8 @@ async def show_my_classes(
     pending = student.get("pending_cancel") if show_pending else None
     if pending:
         try:
-            tz = student_timezone(student)
-            class_dt = parse_student_datetime(pending.get("class_time", ""), student)
-            class_str = class_dt.astimezone(tz).strftime("%a %d %b %H:%M")
+            class_dt = ensure_bangkok(pending.get("class_time", ""))
+            class_str = fmt_bkk(class_dt)
         except Exception:
             class_str = pending.get("class_time", "")
         pending_banner = (

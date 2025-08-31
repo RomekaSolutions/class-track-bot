@@ -83,12 +83,11 @@ def test_get_upcoming_includes_renewal_date(monkeypatch):
 
     monkeypatch.setattr(ctb, "datetime", FixedDatetime)
 
-    tz = ctb.BASE_TZ
     student = {
         "class_dates": [
-            tz.localize(FixedDatetime(2023, 1, 10, 10, 0)).isoformat(),
-            tz.localize(FixedDatetime(2023, 1, 15, 10, 0)).isoformat(),
-            tz.localize(FixedDatetime(2023, 1, 20, 10, 0)).isoformat(),
+            "2023-01-10T10:00",  # naive
+            "2023-01-15T10:00+07:00",  # aware
+            "2023-01-20T10:00",  # naive
         ],
         "renewal_date": "2023-01-15",
         "cancelled_dates": [],
@@ -106,13 +105,32 @@ def test_build_student_classes_text_includes_renewal_date(monkeypatch):
 
     monkeypatch.setattr(ctb, "datetime", FixedDatetime)
 
-    tz = ctb.BASE_TZ
-    dt = tz.localize(FixedDatetime(2023, 1, 15, 10, 0))
+    dt_str = "2023-01-15T10:00"
     student = {
         "name": "Alice",
-        "class_dates": [dt.isoformat()],
+        "class_dates": [dt_str],
         "renewal_date": "2023-01-15",
         "classes_remaining": 1,
     }
     text = ctb.build_student_classes_text(student, limit=5)
-    assert dt.strftime('%A %d %b %Y at %H:%M') in text
+    assert ctb.fmt_bkk(dt_str) in text
+    assert text.count("All times shown in Thai time (ICT).") == 1
+
+
+def test_mixed_log_timestamps_sort(monkeypatch):
+    student = {
+        "name": "Alice",
+        "class_dates": [],
+        "renewal_date": "2024-01-10",
+        "classes_remaining": 0,
+    }
+    logs = [
+        {"student": "alice", "date": "2024-01-02T10:00+07:00", "status": "completed"},
+        {"student": "alice", "date": "2024-01-03T09:00", "status": "missed"},
+    ]
+    monkeypatch.setattr(ctb, "load_logs", lambda: logs)
+    text = ctb.build_student_classes_text(student, limit=5, student_key="alice")
+    lines = text.splitlines()
+    recent_idx = lines.index("Recent classes:")
+    first_log = lines[recent_idx + 1]
+    assert "Wed 03 Jan 09:00 ICT" in first_log
