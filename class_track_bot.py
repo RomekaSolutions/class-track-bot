@@ -2010,7 +2010,9 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif action == "dashboard":
             return await dashboard_command(update, context)
         elif action == "students":
-            return await edit_command(update, context)
+            students = load_students()
+            kb = build_students_page_kb(students, page=0)
+            return await safe_edit_or_send(q, "👥 Students", reply_markup=kb)
         elif action == "addstudent":
             await q.answer()
             return await safe_edit_or_send(
@@ -2037,6 +2039,89 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception:
         logging.exception("ADMIN MENU ACTION CRASH action=%s", action)
         await safe_edit_or_send(q, "Temporary issue opening that admin view.")
+
+
+async def admin_students_page_callback(update, context):
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        return await q.answer("Admins only.", show_alert=True)
+    students = load_students()
+    page = 0
+    data = q.data
+    if ":page:" in data:
+        try:
+            page = int(data.rsplit(":", 1)[-1])
+        except Exception:
+            page = 0
+    kb = build_students_page_kb(students, page=page)
+    await safe_edit_or_send(q, "👥 Students", reply_markup=kb)
+
+
+async def admin_pick_student_callback(update, context):
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        return await q.answer("Admins only.", show_alert=True)
+    student_id = q.data.split(":")[-1]
+    students = load_students()
+    student = students.get(student_id)
+    if not student:
+        await q.answer("Student not found.", show_alert=True)
+        return await admin_students_page_callback(update, context)
+    nameline = display_name(student_id, student)
+    text = f"👤 {nameline}\nChoose an action:"
+    kb = build_student_submenu_kb(student_id)
+    await safe_edit_or_send(q, text, reply_markup=kb)
+
+
+async def admin_student_action_callback(update, context):
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        return await q.answer("Admins only.", show_alert=True)
+    _, _, student_id, action = q.data.split(":", 3)
+    context.user_data["admin_selected_student_id"] = student_id
+    try:
+        if action == "view":
+            context.args = [student_id]
+            return await view_student(update, context)
+        elif action == "cancel":
+            context.args = [student_id]
+            return await cancel_class_command(update, context)
+        elif action == "log":
+            context.args = [student_id]
+            return await log_class_command(update, context)
+        elif action == "free":
+            context.args = [student_id]
+            return await award_free_command(update, context)
+        elif action == "pause":
+            context.args = [student_id]
+            return await pause_student_command(update, context)
+        elif action == "remove":
+            context.args = [student_id]
+            return await remove_student_command(update, context)
+        elif action in {"renew", "resched", "length", "schedule"}:
+            pass
+    except Exception:
+        logging.exception(
+            "ADMIN STUDENT ACTION CRASH sid=%s action=%s", student_id, action
+        )
+        return await safe_edit_or_send(q, "Temporary issue handling that action.")
+
+    hints = {
+        "log": "Use /logclass",
+        "cancel": "Use /cancelclass",
+        "resched": "Use /reschedulestudent",
+        "renew": "Use /renewstudent",
+        "length": "Use /edit to change length",
+        "schedule": "Use /edit to change schedule",
+        "free": "Use /awardfree",
+        "pause": "Use /pause",
+        "remove": "Use /removestudent",
+        "view": "Use /viewstudent",
+    }
+    await q.answer()
+    return await safe_edit_or_send(
+        q, f"{hints.get(action, 'Action coming soon.')} (submenu wiring step 3)"
+    )
 
 
 async def log_unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2975,6 +3060,97 @@ def build_admin_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def display_name(student_id: str, student: dict) -> str:
+    handle = student.get("telegram_handle")
+    name = student.get("name") or handle or student_id
+    if handle and not handle.startswith("@"):
+        handle = "@" + handle
+    return f"{name} {handle or ''}".strip()
+
+
+def build_students_page_kb(
+    students: dict, page: int = 0, per_page: int = 10
+) -> InlineKeyboardMarkup:
+    ids = list(students.keys())
+    start = max(0, page * per_page)
+    end = min(len(ids), start + per_page)
+    rows = []
+    for sid in ids[start:end]:
+        s = students[sid]
+        rows.append(
+            [InlineKeyboardButton(display_name(sid, s), callback_data=f"admin:pick:{sid}")]
+        )
+    nav = []
+    if start > 0:
+        nav.append(
+            InlineKeyboardButton("⬅️ Prev", callback_data=f"admin:students:page:{page-1}")
+        )
+    if end < len(ids):
+        nav.append(
+            InlineKeyboardButton("Next ➡️", callback_data=f"admin:students:page:{page+1}")
+        )
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="admin:root")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_student_submenu_kb(student_id: str) -> InlineKeyboardMarkup:
+    # 9 actions grouped as requested
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Log Class", callback_data=f"admin:stu:{student_id}:log"
+                ),
+                InlineKeyboardButton(
+                    "❌ Cancel Class", callback_data=f"admin:stu:{student_id}:cancel"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔄 Reschedule Class",
+                    callback_data=f"admin:stu:{student_id}:resched",
+                ),
+                InlineKeyboardButton(
+                    "💰 Renew Plan", callback_data=f"admin:stu:{student_id}:renew"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "⏱ Change Class Length",
+                    callback_data=f"admin:stu:{student_id}:length",
+                ),
+                InlineKeyboardButton(
+                    "📅 Edit Weekly Schedule",
+                    callback_data=f"admin:stu:{student_id}:schedule",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎁 Award Free Credit",
+                    callback_data=f"admin:stu:{student_id}:free",
+                ),
+                InlineKeyboardButton(
+                    "⏸ Pause / Resume",
+                    callback_data=f"admin:stu:{student_id}:pause",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🗑 Remove Student",
+                    callback_data=f"admin:stu:{student_id}:remove",
+                ),
+                InlineKeyboardButton(
+                    "👁 View Student",
+                    callback_data=f"admin:stu:{student_id}:view",
+                ),
+            ],
+            [InlineKeyboardButton("⬅️ Back to Students", callback_data="admin:students")],
+        ]
+    )
+
+
 def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
     """Return the welcome text and keyboard for a student."""
     upcoming = get_upcoming_classes(student, count=1)
@@ -3904,6 +4080,23 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_time_slot_callback, pattern="^edit:time:slot:"))
     application.add_handler(CallbackQueryHandler(edit_time_scope_callback, pattern="^edit:time:scope:"))
     application.add_handler(CallbackQueryHandler(edit_time_oncepick_callback, pattern="^edit:time:oncepick:"))
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_student_action_callback,
+            pattern=r"^admin:stu:(\d+):(log|cancel|resched|renew|length|schedule|free|pause|remove|view)$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_pick_student_callback, pattern=r"^admin:pick:(\d+)$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_students_page_callback,
+            pattern=r"^admin:students(:page:(-?\d+))?$",
+        )
+    )
     application.add_handler(CallbackQueryHandler(admin_menu_callback, pattern=r"^admin:"))
     application.add_handler(CallbackQueryHandler(handle_cancel_selection, pattern=r"^cancel_selected:"))
     application.add_handler(CallbackQueryHandler(admin_cancel_callback, pattern="^admin_cancel_sel:"))
