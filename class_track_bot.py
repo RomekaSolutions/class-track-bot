@@ -272,6 +272,11 @@ def resolve_student(students: Dict[str, Any], key: str) -> Tuple[Optional[str], 
     return None, None
 
 
+def is_premium(student: dict) -> bool:
+    """Return True if the student has premium status."""
+    return bool(student.get("premium"))
+
+
 def normalize_students(students: Dict[str, Any]) -> bool:
     """Ensure all student records contain required fields.
 
@@ -1524,6 +1529,11 @@ async def award_free_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not student:
         await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
+    if is_premium(student):
+        await update.message.reply_text(
+            f"Note: {student['name']} is Premium; award/renew not required."
+        )
+        return
     student["free_class_credit"] = student.get("free_class_credit", 0) + 1
     save_students(students)
     logs = load_logs()
@@ -1570,6 +1580,11 @@ async def renew_student_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not student:
         await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
+    if is_premium(student):
+        await update.message.reply_text(
+            f"Note: {student['name']} is Premium; award/renew not required."
+        )
+        return
     student["classes_remaining"] = student.get("classes_remaining", 0) + num_classes
     student["renewal_date"] = renewal
     # Reset last balance warning upon renewal
@@ -1591,6 +1606,44 @@ async def renew_student_command(update: Update, context: ContextTypes.DEFAULT_TY
         f"Renewed {student['name']}: added {num_classes} classes, renewal date set to {renewal}. "
         f"Balance: {student['classes_remaining']}"
     )
+
+
+@admin_only
+async def set_premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle a student's premium status.
+
+    Usage: /setpremium <student_ref> <on|off>
+    """
+
+    args = context.args
+    if len(args) != 2:
+        await update.message.reply_text("Usage: /setpremium <student_ref> <on|off>")
+        return
+
+    student_ref, flag = args
+    students = load_students()
+    student_key, student = resolve_student(students, student_ref)
+    if not student:
+        await update.message.reply_text(f"Student '{student_ref}' not found.")
+        return
+
+    flag_lower = flag.lower()
+    if flag_lower in {"on", "true", "1", "enable", "enabled"}:
+        value = True
+    elif flag_lower in {"off", "false", "0", "disable", "disabled"}:
+        value = False
+    else:
+        await update.message.reply_text("Flag must be 'on' or 'off'.")
+        return
+
+    student["premium"] = value
+    save_students(students)
+    if value:
+        await update.message.reply_text(
+            f"🌟 Premium ENABLED for {student['name']} — unlimited hours (∞)"
+        )
+    else:
+        await update.message.reply_text(f"Premium DISABLED for {student['name']}")
 
 
 @admin_only
@@ -1624,6 +1677,7 @@ def generate_dashboard_summary() -> str:
     now = datetime.now()
     today = now.date()
     month_start = date(now.year, now.month, 1)
+    premium_count = sum(1 for s in students.values() if is_premium(s))
 
     active_students = [s for s in students.values() if not s.get("paused")]
     total_hours = 0.0
@@ -1668,25 +1722,26 @@ def generate_dashboard_summary() -> str:
                     )
                     break
 
-        remaining = student.get("classes_remaining", 0)
-        if remaining <= 2:
-            low_balance.append(student["name"])
+        if not is_premium(student):
+            remaining = student.get("classes_remaining", 0)
+            if remaining <= 2:
+                low_balance.append(student["name"])
 
-        renewal_str = student.get("renewal_date")
-        if renewal_str:
-            try:
-                renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
-            except ValueError:
-                renewal_date = None
-            if renewal_date:
-                if renewal_date < today:
-                    overdue_renewals.append(
-                        f"{student['name']} ({renewal_date.isoformat()})"
-                    )
-                elif today <= renewal_date <= today + timedelta(days=7):
-                    upcoming_renewals.append(
-                        f"{student['name']} ({renewal_date.isoformat()})"
-                    )
+            renewal_str = student.get("renewal_date")
+            if renewal_str:
+                try:
+                    renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
+                except ValueError:
+                    renewal_date = None
+                if renewal_date:
+                    if renewal_date < today:
+                        overdue_renewals.append(
+                            f"{student['name']} ({renewal_date.isoformat()})"
+                        )
+                    elif today <= renewal_date <= today + timedelta(days=7):
+                        upcoming_renewals.append(
+                            f"{student['name']} ({renewal_date.isoformat()})"
+                        )
 
         if student.get("free_class_credit", 0) > 0:
             free_credits.append(
@@ -1695,6 +1750,7 @@ def generate_dashboard_summary() -> str:
 
     lines: List[str] = ["📊 Dashboard Summary", ""]
     lines.append(f"Active students: {len(active_students)}")
+    lines.append(f"Premium students: {premium_count}")
     lines.append(f"Total scheduled hours/week: {total_hours:.1f}")
     lines.append("")
     lines.append(f"Today's classes ({today.isoformat()}):")
@@ -2301,7 +2357,12 @@ async def confirm_cancel_for_student(
         cancelled_dates.append(class_time_str)
 
     cancel_type = pending_cancel.get("type", "late")
-    if cancel_type == "early":
+    if is_premium(student):
+        response = (
+            f"Cancellation confirmed for {student['name']}. (Premium — no deduction.)"
+        )
+        log_status = "cancelled (premium)"
+    elif cancel_type == "early":
         student["reschedule_credit"] = student.get("reschedule_credit", 0) + 1
         response = (
             f"Cancellation confirmed for {student['name']}. Reschedule credit added."
@@ -2327,12 +2388,15 @@ async def confirm_cancel_for_student(
     schedule_student_reminders(context.application, student_key, student)
 
     logs = load_logs()
+    note = "admin confirm cancel"
+    if is_premium(student):
+        note += " (premium)"
     logs.append(
         {
             "student": student_key,
             "date": class_time_str,
             "status": log_status,
-            "note": "admin confirm cancel",
+            "note": note,
         }
     )
     save_logs(logs)
@@ -2829,12 +2893,15 @@ def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMar
     next_class_str = fmt_bkk(upcoming[0]) if upcoming else "No upcoming classes set"
     classes_remaining = student.get("classes_remaining", 0)
     renewal = student.get("renewal_date", "N/A")
-    lines = [
-        f"Hello, {student['name']}!",
-        f"Your next class: {next_class_str}",
-        f"Classes remaining: {classes_remaining}",
-        f"Plan renews on: {renewal}",
-    ]
+    lines = [f"Hello, {student['name']}!"]
+    if is_premium(student):
+        lines.append("🌟 Premium member")
+    lines.append(f"Your next class: {next_class_str}")
+    if is_premium(student):
+        lines.append("Classes remaining: ∞")
+    else:
+        lines.append(f"Classes remaining: {classes_remaining}")
+        lines.append(f"Plan renews on: {renewal}")
     if student.get("paused"):
         lines.append("Your plan is currently paused. Contact your teacher to resume.")
     buttons = [
@@ -3083,13 +3150,20 @@ def build_student_classes_text(
     upcoming_list = get_upcoming_classes(student, count=limit)
     if upcoming_list:
         lines = [f"Upcoming classes for {student['name']}:"]
+        if is_premium(student):
+            lines.append("🌟 Premium member — unlimited hours (∞), no time limit.")
         lines.append("All times shown in Thai time (ICT).")
         for dt in upcoming_list:
             lines.append(f"  - {fmt_bkk(dt, add_label=False)}")
     else:
         lines = ["You have no classes scheduled.", "All times shown in Thai time (ICT)."]
-    lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
-    lines.append(f"Renewal date: {student.get('renewal_date', 'N/A')}")
+        if is_premium(student):
+            lines.insert(1, "🌟 Premium member — unlimited hours (∞), no time limit.")
+    if is_premium(student):
+        lines.append("Classes remaining: ∞")
+    else:
+        lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
+        lines.append(f"Renewal date: {student.get('renewal_date', 'N/A')}")
     if student.get("paused"):
         lines.append("Your plan is currently paused.")
 
@@ -3581,7 +3655,7 @@ async def maybe_send_balance_warning(bot, student) -> bool:
 
     Returns True if the student's record was modified (i.e., a warning was sent).
     """
-    if student.get("paused"):
+    if student.get("paused") or is_premium(student):
         return False
     remaining = student.get("classes_remaining", 0)
     last_sent = student.get("last_balance_warning")
@@ -3715,6 +3789,7 @@ def main() -> None:
     application.add_handler(CommandHandler("cancelclass", cancel_class_command))
     application.add_handler(CommandHandler("awardfree", award_free_command))
     application.add_handler(CommandHandler("renewstudent", renew_student_command))
+    application.add_handler(CommandHandler("setpremium", set_premium_command))
     application.add_handler(CommandHandler("pause", pause_student_command))
     application.add_handler(CommandHandler("liststudents", list_students_command))
     application.add_handler(CommandHandler("edit", edit_command))
