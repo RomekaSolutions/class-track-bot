@@ -72,6 +72,13 @@ except Exception:  # pragma: no cover - fallback for environments without telegr
 import pytz
 from pytz import AmbiguousTimeError, NonExistentTimeError
 
+# New modular dispatch helpers
+from admin_flows import handle_student_action
+from keyboard_builders import (
+    build_student_submenu as kb_build_student_submenu,
+    build_student_detail_view as kb_build_student_detail_view,
+)
+
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -3242,75 +3249,13 @@ def build_students_page_kb(
 
 
 def build_student_submenu_kb(student_id: str) -> InlineKeyboardMarkup:
-    # 9 actions grouped as requested
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "✅ Log Class", callback_data=f"admin:stu:{student_id}:log"
-                ),
-                InlineKeyboardButton(
-                    "❌ Cancel Class", callback_data=f"admin:stu:{student_id}:cancel"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔄 Reschedule Class",
-                    callback_data=f"admin:stu:{student_id}:resched",
-                ),
-                InlineKeyboardButton(
-                    "💰 Renew Plan", callback_data=f"admin:stu:{student_id}:renew"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "⏱ Change Class Length",
-                    callback_data=f"admin:stu:{student_id}:length",
-                ),
-                InlineKeyboardButton(
-                    "📅 Edit Weekly Schedule",
-                    callback_data=f"admin:stu:{student_id}:schedule",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🎁 Award Free Credit",
-                    callback_data=f"admin:stu:{student_id}:free",
-                ),
-                InlineKeyboardButton(
-                    "⏸ Pause / Resume",
-                    callback_data=f"admin:stu:{student_id}:pause",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🗑 Remove Student",
-                    callback_data=f"admin:stu:{student_id}:remove",
-                ),
-                InlineKeyboardButton(
-                    "👁 View Student",
-                    callback_data=f"admin:stu:{student_id}:view",
-                ),
-            ],
-            [InlineKeyboardButton("⬅️ Back to Students", callback_data="admin:students")],
-        ]
-    )
+    """Shim for legacy imports; delegates to :mod:`keyboard_builders`."""
+    return kb_build_student_submenu(student_id)
 
 
 def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
-    schedule = get_upcoming_classes(student, count=len(student.get("class_dates", [])))
-    lines = [f"Student: {student.get('name', student_id)}"]
-    lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
-    if schedule:
-        lines.append("Schedule:")
-        for dt in schedule:
-            lines.append(f"  - {dt.strftime('%a %d %b %H:%M')}")
-    else:
-        lines.append("Schedule: None")
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⬅️ Back", callback_data=f"admin:pick:{student_id}")]]
-    )
-    return "\n".join(lines), kb
+    """Shim delegating to :mod:`keyboard_builders`."""
+    return kb_build_student_detail_view(student_id, student)
 
 
 def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
@@ -4156,6 +4101,23 @@ async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 # -----------------------------------------------------------------------------
 # Setup and main entry point
 # -----------------------------------------------------------------------------
+
+def build_application() -> Application:
+    """Return an application with core command and student handlers.
+
+    This helper is used by tests and diagnostic tools to inspect the
+    configured handlers without starting the bot.
+    """
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_student_action,
+            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
+        )
+    )
+    return app
+
 def main() -> None:
     """Create the bot application and register handlers."""
     # Configure logging
@@ -4244,8 +4206,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_time_oncepick_callback, pattern="^edit:time:oncepick:"))
     application.add_handler(
         CallbackQueryHandler(
-            admin_student_action_callback,
-            pattern=r"^admin:stu:(\d+):(log|cancel|resched|renew|length|schedule|free|pause|remove|view)$",
+            handle_student_action,
+            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
         )
     )
     application.add_handler(
