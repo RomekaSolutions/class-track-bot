@@ -4106,6 +4106,16 @@ async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 # Setup and main entry point
 # -----------------------------------------------------------------------------
 
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the exception and inform the user of a generic error."""
+    logging.error("Unhandled exception", exc_info=context.error)
+    message = getattr(update, "effective_message", None)
+    if message:
+        try:
+            await message.reply_text("Error occurred")
+        except Exception:
+            pass
+
 def build_application() -> Application:
     """Return an application with core command and student handlers.
 
@@ -4113,6 +4123,8 @@ def build_application() -> Application:
     configured handlers without starting the bot.
     """
     app = ApplicationBuilder().token(TOKEN).build()
+    if hasattr(app, "add_error_handler"):
+        app.add_error_handler(global_error_handler)
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(
         CallbackQueryHandler(
@@ -4162,6 +4174,8 @@ def main() -> None:
         .job_queue(job_queue)
         .build()
     )
+    if hasattr(application, "add_error_handler"):
+        application.add_error_handler(global_error_handler)
 
     # Conversation handler for adding student
     async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
