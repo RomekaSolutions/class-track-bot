@@ -1,6 +1,5 @@
 import re
-from datetime import datetime
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Callable
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -28,7 +27,7 @@ def _back_markup(student_id: str) -> InlineKeyboardMarkup:
 
 async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any]):
     # Show upcoming classes for logging
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     future = [
         dt for dt in sorted(student.get("class_dates", [])) if datetime.fromisoformat(dt) >= now
     ]
