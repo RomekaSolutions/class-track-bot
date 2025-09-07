@@ -73,7 +73,11 @@ import pytz
 from pytz import AmbiguousTimeError, NonExistentTimeError
 
 # New modular dispatch helpers
-from admin_flows import handle_student_action
+from admin_flows import (
+    handle_student_action,
+    handle_class_selection,
+    handle_class_confirmation,
+)
 from keyboard_builders import (
     build_student_submenu as kb_build_student_submenu,
     build_student_detail_view as kb_build_student_detail_view,
@@ -4116,6 +4120,16 @@ def build_application() -> Application:
             pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
         )
     )
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_class_selection, pattern=r"^cls:(LOG|CANCEL|RESHED):"
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_class_confirmation, pattern=r"^cfm:(LOG|CANCEL|RESHED):"
+        )
+    )
     return app
 
 def main() -> None:
@@ -4208,6 +4222,16 @@ def main() -> None:
         CallbackQueryHandler(
             handle_student_action,
             pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_class_selection, pattern=r"^cls:(LOG|CANCEL|RESHED):"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_class_confirmation, pattern=r"^cfm:(LOG|CANCEL|RESHED):"
         )
     )
     application.add_handler(

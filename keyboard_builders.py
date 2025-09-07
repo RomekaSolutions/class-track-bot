@@ -36,6 +36,27 @@ def build_student_submenu(student_id: str) -> InlineKeyboardMarkup:
 
 
 def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
-    """Return basic student details and the associated submenu."""
-    text = f"Student: {student.get('name', student_id)}"
+    """Return a detailed summary for ``student`` and the admin submenu."""
+
+    name = student.get("name", student_id)
+    remaining = student.get("classes_remaining", 0)
+
+    # Upcoming class dates – show at most the next three entries
+    class_dates = sorted(student.get("class_dates", []))
+    upcoming = class_dates[:3]
+
+    paused = student.get("paused", False)
+
+    lines = [f"Student: {name}", f"Classes remaining: {remaining}"]
+
+    if upcoming:
+        lines.append("Upcoming classes:")
+        for dt in upcoming:
+            lines.append(f" - {dt}")
+    else:
+        lines.append("No upcoming classes")
+
+    lines.append(f"Paused: {'Yes' if paused else 'No'}")
+
+    text = "\n".join(lines)
     return text, build_student_submenu(student_id)
