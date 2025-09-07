@@ -46,7 +46,7 @@ async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any
 
 
 async def wrap_cancel_class(query, context, student_id: str, student: Dict[str, Any]):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     future = [
         dt for dt in sorted(student.get("class_dates", [])) if datetime.fromisoformat(dt) >= now
     ]
@@ -66,7 +66,7 @@ async def wrap_cancel_class(query, context, student_id: str, student: Dict[str, 
 
 
 async def wrap_reschedule_class(query, context, student_id: str, student: Dict[str, Any]):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     future = [
         dt for dt in sorted(student.get("class_dates", [])) if datetime.fromisoformat(dt) >= now
     ]
