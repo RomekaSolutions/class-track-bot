@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 
 import data_store
 import keyboard_builders
+from helpers import fmt_class_label
 
 
 async def safe_edit_or_send(target, text: str, reply_markup=None) -> None:
@@ -37,7 +38,11 @@ async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any
         )
         return
     buttons = [
-        [InlineKeyboardButton(dt, callback_data=f"cls:LOG:{student_id}:{dt}")]
+        [
+            InlineKeyboardButton(
+                fmt_class_label(dt), callback_data=f"cls:LOG:{student_id}:{dt}"
+            )
+        ]
         for dt in future[:8]
     ]
     buttons.append([InlineKeyboardButton("⬅ Back", callback_data=f"stu:VIEW:{student_id}")])
@@ -56,7 +61,11 @@ async def wrap_cancel_class(query, context, student_id: str, student: Dict[str, 
         )
         return
     buttons = [
-        [InlineKeyboardButton(dt, callback_data=f"cls:CANCEL:{student_id}:{dt}")]
+        [
+            InlineKeyboardButton(
+                fmt_class_label(dt), callback_data=f"cls:CANCEL:{student_id}:{dt}"
+            )
+        ]
         for dt in future[:8]
     ]
     buttons.append([InlineKeyboardButton("⬅ Back", callback_data=f"stu:VIEW:{student_id}")])
@@ -76,7 +85,11 @@ async def wrap_reschedule_class(query, context, student_id: str, student: Dict[s
         )
         return
     buttons = [
-        [InlineKeyboardButton(dt, callback_data=f"cls:RESHED:{student_id}:{dt}")]
+        [
+            InlineKeyboardButton(
+                fmt_class_label(dt), callback_data=f"cls:RESHED:{student_id}:{dt}"
+            )
+        ]
         for dt in future[:8]
     ]
     buttons.append([InlineKeyboardButton("⬅ Back", callback_data=f"stu:VIEW:{student_id}")])
