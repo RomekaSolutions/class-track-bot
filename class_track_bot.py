@@ -77,6 +77,8 @@ from admin_flows import (
     handle_student_action,
     handle_class_selection,
     handle_class_confirmation,
+    renew_received_count,
+    renew_confirm,
 )
 from keyboard_builders import (
     build_student_submenu as kb_build_student_submenu,
@@ -3803,6 +3805,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Handle free-form messages for both admins and students."""
     user_id = update.effective_user.id if update.effective_user else None
     if user_id in ADMIN_IDS:
+        renew_id = context.user_data.get("renew_waiting_for_qty")
+        if renew_id:
+            await renew_received_count(update, context)
+            return
         state = context.user_data.get("edit_state")
         student_key = context.user_data.get("edit_student_key")
         if state and student_key:
@@ -4129,7 +4135,7 @@ def build_application() -> Application:
     app.add_handler(
         CallbackQueryHandler(
             handle_student_action,
-            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
+            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
         )
     )
     app.add_handler(
@@ -4235,7 +4241,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             handle_student_action,
-            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
+            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
         )
     )
     application.add_handler(
@@ -4247,6 +4253,9 @@ def main() -> None:
         CallbackQueryHandler(
             handle_class_confirmation, pattern=r"^cfm:(LOG|CANCEL|RESHED):"
         )
+    )
+    application.add_handler(
+        CallbackQueryHandler(renew_confirm, pattern=r"^cfm:RENEW:")
     )
     application.add_handler(
         CallbackQueryHandler(

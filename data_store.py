@@ -24,6 +24,17 @@ def save_students(data: Dict[str, Any]) -> None:
         json.dump(data, f, indent=2, sort_keys=True)
 
 
+def load_logs() -> List[Dict[str, Any]]:
+    """Return the list of log records from disk."""
+    if not os.path.exists(LOGS_FILE):
+        return []
+    try:
+        with open(LOGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
 def append_log(event: Dict[str, Any]) -> None:
     """Append an event to ``LOGS_FILE``."""
     logs: List[Dict[str, Any]] = []
