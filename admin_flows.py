@@ -1,3 +1,4 @@
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Callable, List
@@ -63,6 +64,10 @@ def get_admin_visible_classes(
             dt = entry.get("date") or entry.get("at")
             if dt:
                 logged.add(dt)
+
+    stray = [dt for dt in student.get("class_dates", []) if dt in logged]
+    if stray:
+        logging.debug("Stray class dates for %s: %s", sid, stray)
 
     dates = [dt for dt in sorted(student.get("class_dates", [])) if dt not in logged]
     return dates[:limit]
@@ -541,11 +546,14 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
         await safe_edit_or_send(query, "Student not found.")
         return
 
+
     if action == "CANCEL":
         iso_dt = payload
         cutoff = student.get("cutoff_hours", 24)
         data_store.cancel_single_class(student_id, iso_dt, cutoff)
         msg = f"Class at {iso_dt} cancelled."
+        await safe_edit_or_send(query, msg, reply_markup=_back_markup(student_id))
+        return
     elif action == "RESHED":
         if "|" in payload:
             iso_dt, extra = payload.split("|", 1)
@@ -562,8 +570,16 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
             else:
                 new_dt = old_dt
             new_iso = new_dt.isoformat()
-        data_store.reschedule_single_class(student_id, iso_dt, new_iso)
-        msg = f"Class moved from {iso_dt} to {new_iso}."
+        if not data_store.reschedule_single_class(student_id, iso_dt, new_iso):
+            await safe_edit_or_send(
+                query, "Failed to reschedule class.", reply_markup=_back_markup(student_id)
+            )
+            return
+        student = data_store.resolve_student(student_id)
+        text, markup = keyboard_builders.build_student_detail_view(student_id, student)
+        msg = f"Class moved from {iso_dt} to {new_iso}.\n\n{text}"
+        await safe_edit_or_send(query, msg, reply_markup=markup)
+        return
     else:
         return
 

@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
 STUDENTS_FILE = "students.json"
@@ -118,6 +118,41 @@ def resolve_student(student_id: str) -> Optional[Dict[str, Any]]:
     return data.get(str(student_id))
 
 
+def replace_class_date(student_id: str, old_iso: str, new_iso: str) -> bool:
+    """Replace ``old_iso`` with ``new_iso`` in a student's schedule.
+
+    Datetime strings must match exactly, including timezone information. The
+    operation is atomic – the old datetime is removed only if the new one is
+    inserted. Returns ``True`` on success and ``False`` otherwise.
+    """
+
+    data = load_students()
+    stu = data.get(str(student_id))
+    if not stu:
+        return False
+
+    try:
+        old_dt = _parse_iso(old_iso)
+        new_dt = _parse_iso(new_iso)
+    except Exception:
+        return False
+
+    dates = [_parse_iso(d) for d in stu.get("class_dates", [])]
+    try:
+        dates.remove(old_dt)
+    except ValueError:
+        return False
+
+    if new_dt not in dates:
+        dates.append(new_dt)
+    dates.sort()
+
+    stu["class_dates"] = [d.isoformat() for d in dates]
+    data[str(student_id)] = stu
+    save_students(data)
+    return True
+
+
 def mark_class_completed(student_id: str, iso_dt: str) -> bool:
     """Mark a class as completed for ``student_id``."""
     data = load_students()
@@ -177,18 +212,8 @@ def cancel_single_class(student_id: str, iso_dt: str, cutoff_hours: int) -> bool
 
 def reschedule_single_class(student_id: str, old_iso: str, new_iso: str) -> bool:
     """Reschedule one class from ``old_iso`` to ``new_iso``."""
-    data = load_students()
-    stu = data.get(str(student_id))
-    if not stu:
+    if not replace_class_date(student_id, old_iso, new_iso):
         return False
-    dates = stu.get("class_dates", [])
-    if old_iso in dates:
-        dates.remove(old_iso)
-    dates.append(new_iso)
-    dates.sort()
-    stu["class_dates"] = dates
-    data[str(student_id)] = stu
-    save_students(data)
     append_log(
         {
             "type": "class_rescheduled",
