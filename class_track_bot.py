@@ -1771,8 +1771,13 @@ def generate_dashboard_summary() -> str:
     paused_students: List[str] = []
     free_credits: List[str] = []
     completed = missed = cancelled = rescheduled = 0
+    skipped_logs = 0
 
     for entry in logs:
+        if "date" not in entry:
+            print(f"⚠️ Skipping malformed log entry (no date): {entry}")
+            skipped_logs += 1
+            continue
         entry_date = parse_log_date(entry["date"])
         if entry_date < month_start:
             continue
@@ -1882,6 +1887,10 @@ def generate_dashboard_summary() -> str:
     lines.append(f"- Missed/late cancels: {missed}")
     lines.append(f"- Cancelled: {cancelled}")
     lines.append(f"- Rescheduled: {rescheduled}")
+
+    if skipped_logs:
+        lines.append("")
+        lines.append(f"Note: {skipped_logs} logs were ignored due to missing date.")
 
     return "\n".join(lines)
 
