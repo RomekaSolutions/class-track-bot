@@ -30,6 +30,14 @@ def _back_markup(student_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _parse_iso(dt_str: str) -> datetime:
+    """Convert ``dt_str`` to a timezone-aware ``datetime``."""
+    dt = datetime.fromisoformat(dt_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def get_admin_visible_classes(
     student_id: str, student: Dict[str, Any], limit: int = 8
 ) -> List[str]:
@@ -61,11 +69,18 @@ def get_admin_visible_classes(
 
 
 async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any]):
-    # Show classes that still need to be logged (past or future)
-    visible = get_admin_visible_classes(student_id, student)
+    """Show past classes that still need to be logged."""
+    now = datetime.now(timezone.utc)
+    visible = [
+        dt
+        for dt in get_admin_visible_classes(student_id, student, limit=9999)
+        if _parse_iso(dt) <= now
+    ]
     if not visible:
         await safe_edit_or_send(
-            query, "No upcoming classes to log", reply_markup=_back_markup(student_id)
+            query,
+            "No unlogged past classes",
+            reply_markup=_back_markup(student_id),
         )
         return
     buttons = [
@@ -74,7 +89,7 @@ async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any
                 fmt_class_label(dt), callback_data=f"cls:LOG:{student_id}:{dt}"
             )
         ]
-        for dt in visible[:8]
+        for dt in visible
     ]
     buttons.append([InlineKeyboardButton("⬅ Back", callback_data=f"stu:VIEW:{student_id}")])
     markup = InlineKeyboardMarkup(buttons)
@@ -423,8 +438,9 @@ async def handle_student_action(update: Update, context: ContextTypes.DEFAULT_TY
         await handler(query, context, student_id, student)
 
 
+# Callback handler for "cls:*" class selection buttons.
 async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle selection of a specific class for log/cancel/reschedule."""
+    """Handle selection of a specific class from "cls:*" buttons."""
     query = update.callback_query
     if not query:
         return
@@ -439,13 +455,50 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if action == "LOG":
-        text = f"Log class at {iso_dt}?"
-        confirm = f"cfm:LOG:{student_id}:{iso_dt}"
+        has_log = data_store.is_class_logged(student_id, iso_dt)
         buttons = [
-            [InlineKeyboardButton("Confirm", callback_data=confirm)],
-            [InlineKeyboardButton("Cancel", callback_data=f"stu:VIEW:{student_id}")],
+            [
+                InlineKeyboardButton(
+                    "✅ Completed",
+                    callback_data=f"log:COMPLETE:{student_id}:{iso_dt}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ Cancelled (Early)",
+                    callback_data=f"log:CANCEL_EARLY:{student_id}:{iso_dt}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ Cancelled (Late)",
+                    callback_data=f"log:CANCEL_LATE:{student_id}:{iso_dt}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔁 Rescheduled",
+                    callback_data=f"log:RESCHEDULED:{student_id}:{iso_dt}",
+                )
+            ],
         ]
-        await safe_edit_or_send(query, text, reply_markup=InlineKeyboardMarkup(buttons))
+        if has_log:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "🔓 Unlog Class",
+                        callback_data=f"log:UNLOG:{student_id}:{iso_dt}",
+                    )
+                ]
+            )
+        buttons.append(
+            [InlineKeyboardButton("⬅ Back", callback_data=f"stu:VIEW:{student_id}")]
+        )
+        await safe_edit_or_send(
+            query,
+            f"Log class at {iso_dt}:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
     elif action == "CANCEL":
         text = f"Cancel class at {iso_dt}?"
         confirm = f"cfm:CANCEL:{student_id}:{iso_dt}"
@@ -474,12 +527,12 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle confirmation callbacks for class operations."""
+    """Handle confirmation callbacks for "cfm:*" buttons."""
     query = update.callback_query
     if not query:
         return
     await query.answer()
-    match = re.match(r"^cfm:(LOG|CANCEL|RESHED):(\d+):(.+)$", query.data)
+    match = re.match(r"^cfm:(CANCEL|RESHED):(\d+):(.+)$", query.data)
     if not match:
         return
     action, student_id, payload = match.groups()
@@ -488,11 +541,7 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
         await safe_edit_or_send(query, "Student not found.")
         return
 
-    if action == "LOG":
-        iso_dt = payload
-        data_store.mark_class_completed(student_id, iso_dt)
-        msg = f"Class at {iso_dt} logged."
-    elif action == "CANCEL":
+    if action == "CANCEL":
         iso_dt = payload
         cutoff = student.get("cutoff_hours", 24)
         data_store.cancel_single_class(student_id, iso_dt, cutoff)
@@ -518,6 +567,40 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
     else:
         return
 
-    updated = data_store.resolve_student(student_id) or {}
-    text, markup = keyboard_builders.build_student_detail_view(student_id, updated)
-    await safe_edit_or_send(query, f"{msg}\n\n{text}", reply_markup=markup)
+
+# ---------------------------------------------------------------------------
+# Callback handler for "log:*" buttons shown after selecting a class to log.
+# ---------------------------------------------------------------------------
+async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle logging status selections."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    match = re.match(
+        r"^log:(COMPLETE|CANCEL_EARLY|CANCEL_LATE|RESCHEDULED|UNLOG):(\d+):(.+)$",
+        query.data,
+    )
+    if not match:
+        return
+    action, student_id, iso_dt = match.groups()
+
+    if action == "UNLOG":
+        removed = data_store.remove_class_log(student_id, iso_dt)
+        if removed:
+            msg = f"Log removed for {iso_dt}."
+        else:
+            msg = "No matching log entry found."
+    else:
+        status_map = {
+            "COMPLETE": "completed",
+            "CANCEL_EARLY": "cancelled_early",
+            "CANCEL_LATE": "cancelled_late",
+            "RESCHEDULED": "rescheduled",
+        }
+        status = status_map[action]
+        data_store.log_class_status(student_id, iso_dt, status)
+        # TODO: allow picking a new date when rescheduling in the future
+        msg = f"Class at {iso_dt} logged as {status.replace('_', ' ')}."
+
+    await safe_edit_or_send(query, msg, reply_markup=_back_markup(student_id))

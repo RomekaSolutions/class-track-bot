@@ -48,15 +48,15 @@ class DummyQuery:
 
 
 @pytest.mark.parametrize(
-    "func, action",
+    "func, action, delta",
     [
-        (admin_flows.wrap_log_class, "LOG"),
-        (admin_flows.wrap_cancel_class, "CANCEL"),
-        (admin_flows.wrap_reschedule_class, "RESHED"),
+        (admin_flows.wrap_log_class, "LOG", -1),
+        (admin_flows.wrap_cancel_class, "CANCEL", 1),
+        (admin_flows.wrap_reschedule_class, "RESHED", 1),
     ],
 )
-def test_class_keyboard_labels(func, action):
-    iso = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+def test_class_keyboard_labels(func, action, delta):
+    iso = (datetime.now(timezone.utc) + timedelta(days=delta)).isoformat()
     student = {"class_dates": [iso]}
     query = DummyQuery()
 

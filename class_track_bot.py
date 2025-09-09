@@ -77,6 +77,7 @@ from admin_flows import (
     handle_student_action,
     handle_class_selection,
     handle_class_confirmation,
+    handle_log_action,
     renew_received_count,
     renew_confirm,
 )
@@ -4193,7 +4194,13 @@ def build_application() -> Application:
     )
     app.add_handler(
         CallbackQueryHandler(
-            handle_class_confirmation, pattern=r"^cfm:(LOG|CANCEL|RESHED):"
+            handle_log_action,
+            pattern=r"^log:(COMPLETE|CANCEL_EARLY|CANCEL_LATE|RESCHEDULED|UNLOG):",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_class_confirmation, pattern=r"^cfm:(CANCEL|RESHED):"
         )
     )
     return app
@@ -4299,7 +4306,13 @@ def main() -> None:
     )
     application.add_handler(
         CallbackQueryHandler(
-            handle_class_confirmation, pattern=r"^cfm:(LOG|CANCEL|RESHED):"
+            handle_log_action,
+            pattern=r"^log:(COMPLETE|CANCEL_EARLY|CANCEL_LATE|RESCHEDULED|UNLOG):",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_class_confirmation, pattern=r"^cfm:(CANCEL|RESHED):"
         )
     )
     application.add_handler(

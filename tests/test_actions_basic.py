@@ -84,3 +84,17 @@ def test_reschedule_single_class(tmp_path, monkeypatch):
     assert logs[-1]["type"] == "class_rescheduled"
     assert logs[-1]["from"] == old
     assert logs[-1]["to"] == new
+
+
+def test_log_and_unlog_class(tmp_path, monkeypatch):
+    logs_file = tmp_path / "logs.json"
+    logs_file.write_text("[]")
+    monkeypatch.setattr(data_store, "LOGS_FILE", str(logs_file))
+    dt = "2025-01-01T10:00:00+00:00"
+    data_store.log_class_status("1", dt, "completed")
+    assert data_store.is_class_logged("1", dt)
+    logs = json.loads(logs_file.read_text())
+    assert logs[-1]["status"] == "completed"
+    removed = data_store.remove_class_log("1", dt)
+    assert removed is True
+    assert not data_store.is_class_logged("1", dt)
