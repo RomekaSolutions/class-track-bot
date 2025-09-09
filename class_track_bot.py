@@ -3877,7 +3877,22 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle free-form messages for both admins and students."""
-    user_id = update.effective_user.id if update.effective_user else None
+    user = update.effective_user
+
+    # Automatically re-key handle-based student records once the
+    # user has sent a message and their numeric Telegram ID is known.
+    students = load_students()
+    if user:
+        tid = str(user.id)
+        handle = getattr(user, "username", None)
+        if handle and handle in students and tid not in students:
+            student = students.pop(handle)
+            student["telegram_id"] = user.id
+            students[tid] = student
+            save_students(students)
+            logging.info("Rekeyed student record from handle '%s' to ID '%s'", handle, tid)
+
+    user_id = user.id if user else None
     if user_id in ADMIN_IDS:
         renew_id = context.user_data.get("renew_waiting_for_qty")
         if renew_id:
