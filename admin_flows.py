@@ -192,6 +192,27 @@ async def wrap_view_student(query, context, student_id: str, student: Dict[str, 
     await safe_edit_or_send(query, text, reply_markup=markup)
 
 
+def validate_student_record(student: Dict[str, Any]) -> Tuple[bool, str]:
+    """Return ``(True, "")`` if ``student`` structure looks valid.
+
+    Validation ensures ``class_dates`` is a non-empty list,
+    ``classes_remaining`` is a positive integer and ``cancelled_dates``
+    exists as a list.  On failure ``False`` and a short explanation are
+    returned.
+    """
+
+    dates = student.get("class_dates")
+    if not isinstance(dates, list) or not dates:
+        return False, "class_dates must be a non-empty list"
+    remaining = student.get("classes_remaining")
+    if not isinstance(remaining, int) or remaining <= 0:
+        return False, "classes_remaining must be a positive integer"
+    cancelled = student.get("cancelled_dates")
+    if not isinstance(cancelled, list):
+        return False, "cancelled_dates must be a list"
+    return True, ""
+
+
 def _is_cycle_finished(student: Dict[str, Any]) -> bool:
     now = datetime.now(timezone.utc)
     if student.get("classes_remaining", 0) != 0:
@@ -388,6 +409,19 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     stu["classes_remaining"] = qty
     stu["renewal_date"] = generated[-1].isoformat()
     stu["cancelled_dates"] = stu.get("cancelled_dates", [])
+    valid, reason = validate_student_record(stu)
+    if not valid:
+        logging.warning(
+            "Rejecting renewal for %s due to invalid student record: %s",
+            student_id,
+            reason,
+        )
+        await safe_edit_or_send(
+            query,
+            f"Student record invalid: {reason}",
+            reply_markup=_back_markup(student_id),
+        )
+        return
     students[str(student_id)] = stu
     data_store.save_students(students)
     data_store.append_log(

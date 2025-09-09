@@ -126,3 +126,45 @@ def test_view_student_incomplete(monkeypatch):
     query = DummyQuery()
     asyncio.run(af.wrap_view_student(query, None, "1", {"name": "A"}))
     assert "Student record incomplete" in query.edited
+
+
+def test_renewal_broken_record_not_saved(monkeypatch):
+    monday = datetime(2025, 1, 6, 18, 0, tzinfo=timezone.utc)
+    thursday = datetime(2025, 1, 9, 17, 0, tzinfo=timezone.utc)
+    logs = _make_history_logs(monday, thursday)
+    monkeypatch.setattr(af.data_store, "load_logs", lambda: logs)
+
+    student = {
+        "name": "A",
+        "classes_remaining": 0,
+        "class_dates": [],
+        "cancelled_dates": "oops",
+    }
+    monkeypatch.setattr(af.data_store, "get_student_by_id", lambda sid: student)
+    students = {"1": student.copy()}
+    monkeypatch.setattr(af.data_store, "load_students", lambda: students)
+    saved = {}
+    monkeypatch.setattr(af.data_store, "save_students", lambda s: saved.update(s))
+    monkeypatch.setattr(af.data_store, "append_log", lambda e: None)
+    monkeypatch.setattr(
+        af.keyboard_builders, "build_student_detail_view", lambda sid, stu: ("ok", None)
+    )
+
+    class DummyQuery:
+        def __init__(self, data):
+            self.data = data
+            self.edited = None
+
+        async def answer(self):
+            pass
+
+        async def edit_message_text(self, text, reply_markup=None):
+            self.edited = text
+
+    query = DummyQuery("cfm:RENEW:1:5")
+    update = types.SimpleNamespace(callback_query=query)
+    asyncio.run(af.renew_confirm(update, types.SimpleNamespace()))
+
+    assert saved == {}
+    assert student["classes_remaining"] == 0
+    assert query.edited.startswith("Student record invalid")
