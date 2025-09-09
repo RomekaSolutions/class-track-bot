@@ -30,13 +30,40 @@ def _back_markup(student_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def get_admin_visible_classes(
+    student_id: str, student: Dict[str, Any], limit: int = 8
+) -> List[str]:
+    """Return class dates visible to admins.
+
+    Admins should see the raw scheduled classes minus any that have already
+    been logged as completed, cancelled or removed.  We intentionally ignore
+    ``cancelled_dates`` here so that pending cancellations still appear until
+    they are logged.
+    """
+
+    logs = data_store.load_logs()
+    sid = str(student_id)
+    logged: set[str] = set()
+    for entry in logs:
+        entry_sid = str(entry.get("student") or entry.get("student_id") or "")
+        if entry_sid != sid:
+            continue
+        status = (entry.get("status") or entry.get("type") or "").lower()
+        if status.startswith("class_"):
+            status = status[6:]
+        if status == "completed" or status == "removed" or status.startswith("cancelled"):
+            dt = entry.get("date") or entry.get("at")
+            if dt:
+                logged.add(dt)
+
+    dates = [dt for dt in sorted(student.get("class_dates", [])) if dt not in logged]
+    return dates[:limit]
+
+
 async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any]):
-    # Show upcoming classes for logging
-    now = datetime.now(timezone.utc)
-    future = [
-        dt for dt in sorted(student.get("class_dates", [])) if datetime.fromisoformat(dt) >= now
-    ]
-    if not future:
+    # Show classes that still need to be logged (past or future)
+    visible = get_admin_visible_classes(student_id, student)
+    if not visible:
         await safe_edit_or_send(
             query, "No upcoming classes to log", reply_markup=_back_markup(student_id)
         )
@@ -47,7 +74,7 @@ async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any
                 fmt_class_label(dt), callback_data=f"cls:LOG:{student_id}:{dt}"
             )
         ]
-        for dt in future[:8]
+        for dt in visible[:8]
     ]
     buttons.append([InlineKeyboardButton("⬅ Back", callback_data=f"stu:VIEW:{student_id}")])
     markup = InlineKeyboardMarkup(buttons)
@@ -55,11 +82,8 @@ async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any
 
 
 async def wrap_cancel_class(query, context, student_id: str, student: Dict[str, Any]):
-    now = datetime.now(timezone.utc)
-    future = [
-        dt for dt in sorted(student.get("class_dates", [])) if datetime.fromisoformat(dt) >= now
-    ]
-    if not future:
+    visible = get_admin_visible_classes(student_id, student)
+    if not visible:
         await safe_edit_or_send(
             query, "No upcoming classes to cancel", reply_markup=_back_markup(student_id)
         )
@@ -70,7 +94,7 @@ async def wrap_cancel_class(query, context, student_id: str, student: Dict[str, 
                 fmt_class_label(dt), callback_data=f"cls:CANCEL:{student_id}:{dt}"
             )
         ]
-        for dt in future[:8]
+        for dt in visible[:8]
     ]
     buttons.append([InlineKeyboardButton("⬅ Back", callback_data=f"stu:VIEW:{student_id}")])
     await safe_edit_or_send(
@@ -79,11 +103,8 @@ async def wrap_cancel_class(query, context, student_id: str, student: Dict[str, 
 
 
 async def wrap_reschedule_class(query, context, student_id: str, student: Dict[str, Any]):
-    now = datetime.now(timezone.utc)
-    future = [
-        dt for dt in sorted(student.get("class_dates", [])) if datetime.fromisoformat(dt) >= now
-    ]
-    if not future:
+    visible = get_admin_visible_classes(student_id, student)
+    if not visible:
         await safe_edit_or_send(
             query, "No upcoming classes to reschedule", reply_markup=_back_markup(student_id)
         )
@@ -94,7 +115,7 @@ async def wrap_reschedule_class(query, context, student_id: str, student: Dict[s
                 fmt_class_label(dt), callback_data=f"cls:RESHED:{student_id}:{dt}"
             )
         ]
-        for dt in future[:8]
+        for dt in visible[:8]
     ]
     buttons.append([InlineKeyboardButton("⬅ Back", callback_data=f"stu:VIEW:{student_id}")])
     await safe_edit_or_send(

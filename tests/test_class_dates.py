@@ -92,9 +92,40 @@ def test_get_upcoming_includes_renewal_date(monkeypatch):
         "renewal_date": "2023-01-15",
         "cancelled_dates": [],
     }
-    upcoming = ctb.get_upcoming_classes(student, count=10)
+    upcoming = ctb.get_student_visible_classes(student, count=10)
     dates = [dt.date() for dt in upcoming]
     assert dates == [date(2023, 1, 10), date(2023, 1, 15)]
+
+
+def test_admin_visible_classes(monkeypatch):
+    """Admin should see past and cancelled classes unless already logged."""
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return tz.localize(cls(2023, 1, 2, 0, 0)) if tz else cls(2023, 1, 2, 0, 0)
+
+    monkeypatch.setattr(ctb, "datetime", FixedDatetime)
+    # No logs recorded yet
+    monkeypatch.setattr(ctb, "load_logs", lambda: [])
+
+    student = {
+        "class_dates": [
+            "2023-01-01T10:00+07:00",  # past
+            "2023-01-03T10:00+07:00",  # future
+        ],
+        "cancelled_dates": ["2023-01-03T10:00+07:00"],
+    }
+
+    admin_list = ctb.get_admin_visible_classes("1", student, count=10)
+    assert [dt.isoformat() for dt in admin_list] == [
+        "2023-01-01T10:00:00+07:00",
+        "2023-01-03T10:00:00+07:00",
+    ]
+
+    # Students should see nothing: past is filtered, future is cancelled
+    student_list = ctb.get_student_visible_classes(student, count=10)
+    assert student_list == []
 
 
 def test_build_student_classes_text_includes_renewal_date(monkeypatch):

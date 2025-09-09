@@ -591,13 +591,13 @@ def next_occurrence(day_time_str: str, now: datetime) -> datetime:
         return now + timedelta(hours=1)
 
 
-def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[datetime]:
-    """Return upcoming class datetimes in the base timezone.
+def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List[datetime]:
+    """Return upcoming classes that a *student* should see.
 
-    ``student['class_dates']`` stores concrete class datetimes as
-    ISO 8601 strings with timezone offsets in the base timezone.
-    This function converts them to aware ``datetime`` objects, filters out
-    past or cancelled classes and returns the next ``count`` items.
+    ``student['class_dates']`` stores concrete class datetimes as ISO 8601
+    strings in the base timezone.  This helper converts them to timezone aware
+    ``datetime`` objects, removes past occurrences and any dates present in
+    ``cancelled_dates`` and returns the next ``count`` items.
     """
     now = ensure_bangkok(datetime.now())
     cancelled = set(student.get("cancelled_dates", []))
@@ -622,6 +622,50 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
         if item in cancelled or dt.isoformat() in cancelled:
             continue
         if renewal_date and dt.date() > renewal_date:
+            continue
+        results.append(dt)
+    results.sort()
+    return results[:count]
+
+
+def get_admin_visible_classes(
+    student_id: str, student: Dict[str, Any], count: int = 5
+) -> List[datetime]:
+    """Return class datetimes an *admin* should see.
+
+    Unlike ``get_student_visible_classes`` this does **not** filter out past
+    classes nor check ``cancelled_dates``.  It only removes classes that already
+    have log entries marked as completed, cancelled or removed in ``logs.json``.
+    This allows admins to see past classes that still need action while keeping
+    the list clean of already processed entries.
+    """
+
+    logs = load_logs()
+    sid = str(student_id)
+    logged: set[str] = set()
+    for entry in logs:
+        entry_sid = str(entry.get("student") or entry.get("student_id") or "")
+        if entry_sid != sid:
+            continue
+        status = (entry.get("status") or entry.get("type") or "").lower()
+        # Treat both "status" and legacy "type" fields uniformly
+        if status.startswith("class_"):
+            status = status[6:]
+        if status == "completed" or status == "removed" or status.startswith("cancelled"):
+            dt_str = entry.get("date") or entry.get("at")
+            if dt_str:
+                logged.add(dt_str)
+
+    results: List[datetime] = []
+    for item in student.get("class_dates", []):
+        try:
+            dt = ensure_bangkok(item)
+        except Exception:
+            try:
+                dt = ensure_bangkok(datetime.strptime(item, "%Y-%m-%d %H:%M"))
+            except Exception:
+                continue
+        if item in logged or dt.isoformat() in logged:
             continue
         results.append(dt)
     results.sort()
@@ -1453,7 +1497,8 @@ async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not student:
         await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    upcoming_list = get_upcoming_classes(student, count=8)
+    # Admins see raw scheduled classes minus already logged ones
+    upcoming_list = get_admin_visible_classes(student_key, student, count=8)
     if not upcoming_list:
         await update.message.reply_text("No upcoming classes to cancel.")
         return
@@ -1493,7 +1538,8 @@ async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         await query.edit_message_text("Invalid selection.")
         return
-    upcoming_list = get_upcoming_classes(student, count=8)
+    # Use admin visibility to ensure cancelled or completed classes are excluded
+    upcoming_list = get_admin_visible_classes(student_key, student, count=8)
     if index < 0 or index >= len(upcoming_list):
         await query.edit_message_text("Invalid selection.")
         return
@@ -1726,14 +1772,15 @@ def generate_dashboard_summary() -> str:
         elif "rescheduled" in status:
             rescheduled += 1
 
-    for student in students.values():
+    for sid, student in students.items():
         tz = student_timezone(student)
         today_student = datetime.now(tz).date()
 
         if student.get("paused"):
             paused_students.append(student["name"])
         else:
-            for dt in get_upcoming_classes(student, count=3):
+            # Admin view considers any unlogged class, including past ones
+            for dt in get_admin_visible_classes(sid, student, count=3):
                 if dt.astimezone(tz).date() == today_student:
                     today_classes.append(
                         f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}"
@@ -2205,7 +2252,8 @@ async def initiate_log_class(query, context, student_id, student):
 
 
 async def initiate_cancel_class_admin(query, context, student_id, student):
-    upcoming_list = get_upcoming_classes(student, count=8)
+    # Admin-specific view ignores cancelled_dates and past logs
+    upcoming_list = get_admin_visible_classes(student_id, student, count=8)
     if not upcoming_list:
         return await safe_edit_or_send(query, "No upcoming classes to cancel.")
     context.user_data["admin_cancel"] = {
@@ -2964,9 +3012,9 @@ async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Student not found.")
         return
 
-    # Retrieve upcoming classes and display
-    schedule = get_upcoming_classes(
-        student, count=len(student.get("class_dates", []))
+    # Retrieve admin-visible schedule: all unlogged classes
+    schedule = get_admin_visible_classes(
+        student_key, student, count=len(student.get("class_dates", []))
     )
 
     renewal_str = student.get("renewal_date")
@@ -3266,7 +3314,7 @@ def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple
 
 def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
     """Return the welcome text and keyboard for a student."""
-    upcoming = get_upcoming_classes(student, count=1)
+    upcoming = get_student_visible_classes(student, count=1)
     next_class_str = fmt_bkk(upcoming[0]) if upcoming else "No upcoming classes set"
     classes_remaining = student.get("classes_remaining", 0)
     renewal = student.get("renewal_date", "N/A")
@@ -3524,7 +3572,7 @@ def build_student_classes_text(
 ) -> str:
     """Return the text shown in a student's "My Classes" view."""
     limit = max(1, min(20, limit))
-    upcoming_list = get_upcoming_classes(student, count=limit)
+    upcoming_list = get_student_visible_classes(student, count=limit)
     if upcoming_list:
         lines = [f"Upcoming classes for {student['name']}:"]
         if is_premium(student):
@@ -3703,7 +3751,7 @@ async def handle_cancel_dismiss(query, student_key: str, student: Dict[str, Any]
 
 async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
     """Begin the cancellation process.  Show a list of upcoming classes."""
-    upcoming_list = get_upcoming_classes(student, count=5)
+    upcoming_list = get_student_visible_classes(student, count=5)
     if not upcoming_list:
         await safe_edit_or_send(query, "You have no classes to cancel.")
         return
@@ -3745,7 +3793,7 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     except ValueError:
         await safe_edit_or_send(query, "Invalid selection.")
         return
-    upcoming = get_upcoming_classes(student, count=5)
+    upcoming = get_student_visible_classes(student, count=5)
     if idx >= len(upcoming):
         await safe_edit_or_send(query, "Invalid class selected.")
         return
