@@ -49,6 +49,69 @@ def append_log(event: Dict[str, Any]) -> None:
         json.dump(logs, f, indent=2, sort_keys=True)
 
 
+def _parse_iso(dt_str: str) -> datetime:
+    """Return timezone-aware datetime from ``dt_str``."""
+    dt = datetime.fromisoformat(dt_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def is_class_logged(student_id: str, iso_dt: str) -> bool:
+    """Return True if a log entry exists for ``student_id`` at ``iso_dt``."""
+    target = _parse_iso(iso_dt)
+    sid = str(student_id)
+    for entry in load_logs():
+        entry_sid = str(entry.get("student") or entry.get("student_id") or "")
+        if entry_sid != sid:
+            continue
+        dt_val = entry.get("date") or entry.get("at")
+        if not dt_val:
+            continue
+        try:
+            if _parse_iso(dt_val) == target:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def log_class_status(student_id: str, iso_dt: str, status: str) -> None:
+    """Append a class status entry to ``logs.json``."""
+    aware = _parse_iso(iso_dt).isoformat()
+    append_log(
+        {
+            "student_id": student_id,
+            "date": aware,
+            "status": status,
+            "ts": datetime.utcnow().isoformat(),
+        }
+    )
+
+
+def remove_class_log(student_id: str, iso_dt: str) -> bool:
+    """Remove log matching ``student_id`` and ``iso_dt``. Return True if removed."""
+    sid = str(student_id)
+    target = _parse_iso(iso_dt)
+    logs = load_logs()
+    new_logs: List[Dict[str, Any]] = []
+    removed = False
+    for entry in logs:
+        entry_sid = str(entry.get("student") or entry.get("student_id") or "")
+        dt_val = entry.get("date") or entry.get("at")
+        if entry_sid == sid and dt_val:
+            try:
+                if _parse_iso(dt_val) == target:
+                    removed = True
+                    continue
+            except Exception:
+                pass
+        new_logs.append(entry)
+    if removed:
+        with open(LOGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(new_logs, f, indent=2, sort_keys=True)
+    return removed
+
 def resolve_student(student_id: str) -> Optional[Dict[str, Any]]:
     """Return the student record for ``student_id`` if available."""
     data = load_students()
