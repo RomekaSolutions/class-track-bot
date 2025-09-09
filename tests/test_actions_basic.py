@@ -1,7 +1,7 @@
 import os
 import sys
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Ensure repository root on path
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -71,7 +71,7 @@ def test_cancel_single_class_late(tmp_path, monkeypatch):
 
 
 def test_reschedule_single_class(tmp_path, monkeypatch):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     old = (now + timedelta(days=1)).isoformat()
     new = (now + timedelta(days=3)).isoformat()
     students_file, logs_file = _setup(monkeypatch, tmp_path, [old])
@@ -84,6 +84,18 @@ def test_reschedule_single_class(tmp_path, monkeypatch):
     assert logs[-1]["type"] == "class_rescheduled"
     assert logs[-1]["from"] == old
     assert logs[-1]["to"] == new
+
+
+def test_replace_class_date(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    old = (now + timedelta(days=1)).isoformat()
+    new = (now + timedelta(days=2)).isoformat()
+    students_file, _ = _setup(monkeypatch, tmp_path, [old])
+    assert data_store.replace_class_date("1", old, new) is True
+    data = json.loads(students_file.read_text())
+    stu = data["1"]
+    assert old not in stu["class_dates"]
+    assert stu["class_dates"].count(new) == 1
 
 
 def test_log_and_unlog_class(tmp_path, monkeypatch):
