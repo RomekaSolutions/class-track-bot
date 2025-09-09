@@ -42,45 +42,52 @@ def _parse_iso(dt_str: str) -> datetime:
 def get_admin_visible_classes(
     student_id: str, student: Dict[str, Any], limit: int = 8
 ) -> List[str]:
-    """Return class dates visible to admins.
+    """Return past class dates that still need logging.
 
-    Admins should see the raw scheduled classes minus any that have already
-    been logged as completed, cancelled or removed.  We intentionally ignore
-    ``cancelled_dates`` here so that pending cancellations still appear until
-    they are logged.
+    This powers the **Log Class** menu and excludes any class already logged
+    as completed, cancelled, rescheduled or removed.
     """
 
     logs = data_store.load_logs()
-    sid = str(student_id)
-    logged: set[str] = set()
-    for entry in logs:
-        entry_sid = str(entry.get("student") or entry.get("student_id") or "")
-        if entry_sid != sid:
+    now = datetime.now(timezone.utc)
+    visible: List[str] = []
+    for dt in sorted(student.get("class_dates", [])):
+        try:
+            aware = _parse_iso(dt)
+        except Exception:
             continue
-        status = (entry.get("status") or entry.get("type") or "").lower()
-        if status.startswith("class_"):
-            status = status[6:]
-        if status == "completed" or status == "removed" or status.startswith("cancelled"):
-            dt = entry.get("date") or entry.get("at")
-            if dt:
-                logged.add(dt)
+        if aware > now:
+            continue
+        if data_store.is_class_logged(student_id, dt, logs):
+            continue
+        visible.append(dt)
+    return visible[:limit]
 
-    stray = [dt for dt in student.get("class_dates", []) if dt in logged]
-    if stray:
-        logging.debug("Stray class dates for %s: %s", sid, stray)
 
-    dates = [dt for dt in sorted(student.get("class_dates", [])) if dt not in logged]
+def get_admin_upcoming_classes(
+    student_id: str, student: Dict[str, Any], limit: int = 8
+) -> List[str]:
+    """Return upcoming class dates with no existing logs."""
+
+    logs = data_store.load_logs()
+    now = datetime.now(timezone.utc)
+    dates: List[str] = []
+    for dt in sorted(student.get("class_dates", [])):
+        try:
+            aware = _parse_iso(dt)
+        except Exception:
+            continue
+        if aware <= now:
+            continue
+        if data_store.is_class_logged(student_id, dt, logs):
+            continue
+        dates.append(dt)
     return dates[:limit]
 
 
 async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any]):
     """Show past classes that still need to be logged."""
-    now = datetime.now(timezone.utc)
-    visible = [
-        dt
-        for dt in get_admin_visible_classes(student_id, student, limit=9999)
-        if _parse_iso(dt) <= now
-    ]
+    visible = get_admin_visible_classes(student_id, student, limit=9999)
     if not visible:
         await safe_edit_or_send(
             query,
@@ -102,7 +109,7 @@ async def wrap_log_class(query, context, student_id: str, student: Dict[str, Any
 
 
 async def wrap_cancel_class(query, context, student_id: str, student: Dict[str, Any]):
-    visible = get_admin_visible_classes(student_id, student)
+    visible = get_admin_upcoming_classes(student_id, student)
     if not visible:
         await safe_edit_or_send(
             query, "No upcoming classes to cancel", reply_markup=_back_markup(student_id)
@@ -123,7 +130,7 @@ async def wrap_cancel_class(query, context, student_id: str, student: Dict[str, 
 
 
 async def wrap_reschedule_class(query, context, student_id: str, student: Dict[str, Any]):
-    visible = get_admin_visible_classes(student_id, student)
+    visible = get_admin_upcoming_classes(student_id, student)
     if not visible:
         await safe_edit_or_send(
             query, "No upcoming classes to reschedule", reply_markup=_back_markup(student_id)

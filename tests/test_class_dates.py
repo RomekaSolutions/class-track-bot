@@ -98,7 +98,7 @@ def test_get_upcoming_includes_renewal_date(monkeypatch):
 
 
 def test_admin_visible_classes(monkeypatch):
-    """Admin should see past and cancelled classes unless already logged."""
+    """Admin should see only past classes that are not logged."""
 
     class FixedDatetime(datetime):
         @classmethod
@@ -106,7 +106,6 @@ def test_admin_visible_classes(monkeypatch):
             return tz.localize(cls(2023, 1, 2, 0, 0)) if tz else cls(2023, 1, 2, 0, 0)
 
     monkeypatch.setattr(ctb, "datetime", FixedDatetime)
-    # No logs recorded yet
     monkeypatch.setattr(ctb, "load_logs", lambda: [])
 
     student = {
@@ -120,12 +119,49 @@ def test_admin_visible_classes(monkeypatch):
     admin_list = ctb.get_admin_visible_classes("1", student, count=10)
     assert [dt.isoformat() for dt in admin_list] == [
         "2023-01-01T10:00:00+07:00",
-        "2023-01-03T10:00:00+07:00",
     ]
 
     # Students should see nothing: past is filtered, future is cancelled
     student_list = ctb.get_student_visible_classes(student, count=10)
     assert student_list == []
+
+
+def test_admin_visible_classes_skips_logged(monkeypatch):
+    """Past classes already logged should be excluded."""
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return tz.localize(cls(2023, 1, 6, 0, 0)) if tz else cls(2023, 1, 6, 0, 0)
+
+    monkeypatch.setattr(ctb, "datetime", FixedDatetime)
+
+    logs = [
+        {"student": "1", "date": "2023-01-01T10:00+07:00", "status": "completed"},
+        {
+            "student": "1",
+            "date": "2023-01-03T10:00+07:00",
+            "status": "cancelled_early",
+        },
+        {"student": "1", "date": "2023-01-05T10:00+07:00", "status": "rescheduled"},
+    ]
+    monkeypatch.setattr(ctb, "load_logs", lambda: logs)
+
+    student = {
+        "class_dates": [
+            "2023-01-01T10:00+07:00",
+            "2023-01-02T10:00+07:00",
+            "2023-01-03T10:00+07:00",
+            "2023-01-04T10:00+07:00",
+            "2023-01-05T10:00+07:00",
+        ]
+    }
+
+    visible = ctb.get_admin_visible_classes("1", student, count=10)
+    assert [dt.isoformat() for dt in visible] == [
+        "2023-01-02T10:00:00+07:00",
+        "2023-01-04T10:00:00+07:00",
+    ]
 
 
 def test_build_student_classes_text_includes_renewal_date(monkeypatch):
