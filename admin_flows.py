@@ -15,6 +15,11 @@ from helpers import (
 )
 
 
+STUDENT_NOT_FOUND_MSG = (
+    "❌ This student was not found — they may have been removed or renamed."
+)
+
+
 async def safe_edit_or_send(target, text: str, reply_markup=None) -> None:
     """Edit message if possible, otherwise send a new message."""
     if hasattr(target, "edit_message_text"):
@@ -263,9 +268,9 @@ async def renew_received_count(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Please send a positive integer.")
         return
     context.user_data.pop("renew_waiting_for_qty", None)
-    student = data_store.resolve_student(student_id)
+    student = data_store.get_student_by_id(student_id)
     if not student:
-        await update.message.reply_text("Student not found.")
+        await update.message.reply_text(STUDENT_NOT_FOUND_MSG)
         return
     text = (
         f"New set for {student.get('name', student_id)}: {qty} classes. "
@@ -288,9 +293,9 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     student_id, qty_str = match.groups()
     qty = int(qty_str)
-    student = data_store.resolve_student(student_id)
+    student = data_store.get_student_by_id(student_id)
     if not student:
-        await safe_edit_or_send(query, "Student not found.")
+        await safe_edit_or_send(query, STUDENT_NOT_FOUND_MSG)
         return
     if not _is_cycle_finished(student):
         text, markup = keyboard_builders.build_student_detail_view(student_id, student)
@@ -441,13 +446,15 @@ async def handle_student_action(update: Update, context: ContextTypes.DEFAULT_TY
     if not match:
         return
     action, student_id = match.group(1), match.group(2)
-    student = data_store.resolve_student(student_id)
+    student = data_store.get_student_by_id(student_id)
     if not student:
-        await safe_edit_or_send(query, "Student not found.")
+        await safe_edit_or_send(query, STUDENT_NOT_FOUND_MSG)
         return
     handler = actions_map.get(action)
     if handler:
         await handler(query, context, student_id, student)
+    else:
+        logging.warning("Unhandled student action: %s", query.data)
 
 
 # Callback handler for "cls:*" class selection buttons.
@@ -461,8 +468,11 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
     if not match:
         return
     action, student_id, iso_dt = match.groups()
-    student = data_store.resolve_student(student_id)
-    if not student or iso_dt not in student.get("class_dates", []):
+    student = data_store.get_student_by_id(student_id)
+    if not student:
+        await safe_edit_or_send(query, STUDENT_NOT_FOUND_MSG)
+        return
+    if iso_dt not in student.get("class_dates", []):
         await safe_edit_or_send(query, "Class not found.", reply_markup=_back_markup(student_id))
         return
 
@@ -548,9 +558,9 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
     if not match:
         return
     action, student_id, payload = match.groups()
-    student = data_store.resolve_student(student_id)
+    student = data_store.get_student_by_id(student_id)
     if not student:
-        await safe_edit_or_send(query, "Student not found.")
+        await safe_edit_or_send(query, STUDENT_NOT_FOUND_MSG)
         return
 
 
@@ -582,7 +592,7 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
                 query, "Failed to reschedule class.", reply_markup=_back_markup(student_id)
             )
             return
-        student = data_store.resolve_student(student_id)
+        student = data_store.get_student_by_id(student_id)
         text, markup = keyboard_builders.build_student_detail_view(student_id, student)
         msg = f"Class moved from {iso_dt} to {new_iso}.\n\n{text}"
         await safe_edit_or_send(query, msg, reply_markup=markup)
@@ -607,6 +617,9 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not match:
         return
     action, student_id, iso_dt = match.groups()
+    if not data_store.get_student_by_id(student_id):
+        await safe_edit_or_send(query, STUDENT_NOT_FOUND_MSG)
+        return
 
     if action == "UNLOG":
         removed = data_store.remove_class_log(student_id, iso_dt)

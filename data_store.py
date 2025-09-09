@@ -24,6 +24,22 @@ def save_students(data: Dict[str, Any]) -> None:
         json.dump(data, f, indent=2, sort_keys=True)
 
 
+def get_student_by_id(student_id: str, safe: bool = True) -> Optional[Dict[str, Any]]:
+    """Return student dict for ``student_id``.
+
+    If ``safe`` is ``True`` (default) then ``None`` is returned when the ID is
+    missing.  Otherwise a ``KeyError`` is raised.
+    """
+
+    data = load_students()
+    try:
+        return data[str(student_id)]
+    except KeyError:
+        if safe:
+            return None
+        raise
+
+
 def load_logs() -> List[Dict[str, Any]]:
     """Return the list of log records from disk."""
     if not os.path.exists(LOGS_FILE):
@@ -133,9 +149,9 @@ def remove_class_log(student_id: str, iso_dt: str) -> bool:
     return removed
 
 def resolve_student(student_id: str) -> Optional[Dict[str, Any]]:
-    """Return the student record for ``student_id`` if available."""
-    data = load_students()
-    return data.get(str(student_id))
+    """Backward-compatible wrapper for ``get_student_by_id``."""
+
+    return get_student_by_id(student_id, safe=True)
 
 
 def replace_class_date(student_id: str, old_iso: str, new_iso: str) -> bool:
