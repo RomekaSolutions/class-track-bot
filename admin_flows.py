@@ -1,7 +1,7 @@
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Callable, List
+from typing import Dict, Any, Callable, List, Optional, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -10,8 +10,10 @@ import data_store
 import keyboard_builders
 from helpers import (
     fmt_class_label,
-    extract_weekly_pattern,
     generate_from_pattern,
+    get_weekly_pattern_from_history,
+    slots_to_text,
+    Slot,
 )
 
 
@@ -176,7 +178,17 @@ async def wrap_pause_toggle(query, context, student_id: str, student: Dict[str, 
 
 
 async def wrap_view_student(query, context, student_id: str, student: Dict[str, Any]):
-    text, markup = keyboard_builders.build_student_detail_view(student_id, student)
+    try:
+        if not isinstance(student.get("class_dates"), list) or "classes_remaining" not in student:
+            raise KeyError
+        text, markup = keyboard_builders.build_student_detail_view(student_id, student)
+    except Exception:
+        await safe_edit_or_send(
+            query,
+            "Student record incomplete — recheck or renew manually",
+            reply_markup=_back_markup(student_id),
+        )
+        return
     await safe_edit_or_send(query, text, reply_markup=markup)
 
 
@@ -206,6 +218,33 @@ def _last_renewal_qty(student_id: str) -> int:
     return 0
 
 
+def _history_and_pattern(
+    student_id: str,
+) -> Tuple[List[datetime], Optional[List[Slot]]]:
+    """Return class history and detected weekly pattern for ``student_id``."""
+
+    logs = data_store.load_logs()
+    history: List[datetime] = []
+    for event in logs:
+        if str(event.get("student_id")) != str(student_id):
+            continue
+        dt_str = None
+        if event.get("type") == "class_completed":
+            dt_str = event.get("at")
+        elif event.get("type") == "class_cancelled":
+            dt_str = event.get("at")
+        elif event.get("type") == "class_rescheduled":
+            dt_str = event.get("to")
+        if dt_str:
+            try:
+                history.append(datetime.fromisoformat(dt_str))
+            except Exception:
+                continue
+    history.sort()
+    pattern = get_weekly_pattern_from_history(history)
+    return history, pattern
+
+
 async def renew_start(query, context, student_id: str, student: Dict[str, Any]):
     if not _is_cycle_finished(student):
         await safe_edit_or_send(
@@ -214,12 +253,14 @@ async def renew_start(query, context, student_id: str, student: Dict[str, Any]):
             reply_markup=_back_markup(student_id),
         )
         return
+    last_qty = _last_renewal_qty(student_id)
+    same_text = f"Same total ({last_qty})" if last_qty > 0 else "Same total"
     text = (
         f"Renew classes for {student.get('name', student_id)}. "
         "Use same total as last set, or enter a new total?"
     )
     buttons = [
-        [InlineKeyboardButton("Same total", callback_data=f"stu:RENEW_SAME:{student_id}")],
+        [InlineKeyboardButton(same_text, callback_data=f"stu:RENEW_SAME:{student_id}")],
         [InlineKeyboardButton("Enter total", callback_data=f"stu:RENEW_ENTER:{student_id}")],
         [InlineKeyboardButton("⬅ Back", callback_data=f"stu:VIEW:{student_id}")],
     ]
@@ -237,9 +278,18 @@ async def renew_same(query, context, student_id: str, student: Dict[str, Any]):
             message="No previous total found. Enter total number of classes.",
         )
         return
+    _, pattern = _history_and_pattern(student_id)
+    if not pattern:
+        await safe_edit_or_send(
+            query,
+            "No prior weekly pattern found. Set a weekly schedule first.",
+            reply_markup=_back_markup(student_id),
+        )
+        return
+    schedule = slots_to_text(pattern)
     text = (
         f"New set for {student.get('name', student_id)}: {qty} classes. "
-        "Schedule will follow your existing weekly pattern from the next suitable slot."
+        f"Schedule: {schedule}"
     )
     buttons = [
         [InlineKeyboardButton("Confirm", callback_data=f"cfm:RENEW:{student_id}:{qty}")],
@@ -272,9 +322,17 @@ async def renew_received_count(update: Update, context: ContextTypes.DEFAULT_TYP
     if not student:
         await update.message.reply_text(STUDENT_NOT_FOUND_MSG)
         return
+    _, pattern = _history_and_pattern(student_id)
+    if not pattern:
+        await update.message.reply_text(
+            "No prior weekly pattern found. Set a weekly schedule first.",
+            reply_markup=_back_markup(student_id),
+        )
+        return
+    schedule = slots_to_text(pattern)
     text = (
         f"New set for {student.get('name', student_id)}: {qty} classes. "
-        "Schedule will follow your existing weekly pattern from the next suitable slot."
+        f"Schedule: {schedule}"
     )
     buttons = [
         [InlineKeyboardButton("Confirm", callback_data=f"cfm:RENEW:{student_id}:{qty}")],
@@ -306,25 +364,8 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    logs = data_store.load_logs()
-    history: List[datetime] = []
-    for event in logs:
-        if str(event.get("student_id")) != str(student_id):
-            continue
-        dt_str = None
-        if event.get("type") == "class_completed":
-            dt_str = event.get("at")
-        elif event.get("type") == "class_cancelled":
-            dt_str = event.get("at")
-        elif event.get("type") == "class_rescheduled":
-            dt_str = event.get("to")
-        if dt_str:
-            try:
-                history.append(datetime.fromisoformat(dt_str))
-            except Exception:
-                continue
-    history.sort()
-    if not history:
+    history, pattern = _history_and_pattern(student_id)
+    if not history or not pattern:
         await safe_edit_or_send(
             query,
             "No prior weekly pattern found. Set a weekly schedule first.",
@@ -332,15 +373,6 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
     last_dt = history[-1]
-    pattern_dates = [dt.isoformat() for dt in history[-8:]]
-    pattern = extract_weekly_pattern(pattern_dates)
-    if not pattern:
-        await safe_edit_or_send(
-            query,
-            "No prior weekly pattern found. Set a weekly schedule first.",
-            reply_markup=_back_markup(student_id),
-        )
-        return
     generated = generate_from_pattern(last_dt, pattern, qty)
     if not generated:
         await safe_edit_or_send(
@@ -355,6 +387,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     stu["class_dates"] = [dt.isoformat() for dt in generated]
     stu["classes_remaining"] = qty
     stu["renewal_date"] = generated[-1].isoformat()
+    stu["cancelled_dates"] = stu.get("cancelled_dates", [])
     students[str(student_id)] = stu
     data_store.save_students(students)
     data_store.append_log(
