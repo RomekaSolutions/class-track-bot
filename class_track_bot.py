@@ -86,6 +86,8 @@ from keyboard_builders import (
     build_student_detail_view as kb_build_student_detail_view,
 )
 
+import data_store
+
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -632,31 +634,15 @@ def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List
 def get_admin_visible_classes(
     student_id: str, student: Dict[str, Any], count: int = 5
 ) -> List[datetime]:
-    """Return class datetimes an *admin* should see.
+    """Return past class datetimes that still need logging.
 
-    Unlike ``get_student_visible_classes`` this does **not** filter out past
-    classes nor check ``cancelled_dates``.  It only removes classes that already
-    have log entries marked as completed, cancelled or removed in ``logs.json``.
-    This allows admins to see past classes that still need action while keeping
-    the list clean of already processed entries.
+    This powers the **Log Class** admin menu and must never include classes that
+    have already been logged as completed, cancelled, rescheduled or removed.
+    Future classes are ignored here; admins see only past, unlogged entries.
     """
 
     logs = load_logs()
-    sid = str(student_id)
-    logged: set[str] = set()
-    for entry in logs:
-        entry_sid = str(entry.get("student") or entry.get("student_id") or "")
-        if entry_sid != sid:
-            continue
-        status = (entry.get("status") or entry.get("type") or "").lower()
-        # Treat both "status" and legacy "type" fields uniformly
-        if status.startswith("class_"):
-            status = status[6:]
-        if status == "completed" or status == "removed" or status.startswith("cancelled"):
-            dt_str = entry.get("date") or entry.get("at")
-            if dt_str:
-                logged.add(dt_str)
-
+    now = ensure_bangkok(datetime.now())
     results: List[datetime] = []
     for item in student.get("class_dates", []):
         try:
@@ -666,7 +652,34 @@ def get_admin_visible_classes(
                 dt = ensure_bangkok(datetime.strptime(item, "%Y-%m-%d %H:%M"))
             except Exception:
                 continue
-        if item in logged or dt.isoformat() in logged:
+        if dt > now:
+            continue
+        if data_store.is_class_logged(student_id, dt.isoformat(), logs):
+            continue
+        results.append(dt)
+    results.sort()
+    return results[:count]
+
+
+def get_admin_upcoming_classes(
+    student_id: str, student: Dict[str, Any], count: int = 5
+) -> List[datetime]:
+    """Return upcoming class datetimes not yet logged by admins."""
+
+    logs = load_logs()
+    now = ensure_bangkok(datetime.now())
+    results: List[datetime] = []
+    for item in student.get("class_dates", []):
+        try:
+            dt = ensure_bangkok(item)
+        except Exception:
+            try:
+                dt = ensure_bangkok(datetime.strptime(item, "%Y-%m-%d %H:%M"))
+            except Exception:
+                continue
+        if dt <= now:
+            continue
+        if data_store.is_class_logged(student_id, dt.isoformat(), logs):
             continue
         results.append(dt)
     results.sort()
@@ -1498,8 +1511,8 @@ async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not student:
         await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    # Admins see raw scheduled classes minus already logged ones
-    upcoming_list = get_admin_visible_classes(student_key, student, count=8)
+    # Admins see upcoming scheduled classes minus already logged ones
+    upcoming_list = get_admin_upcoming_classes(student_key, student, count=8)
     if not upcoming_list:
         await update.message.reply_text("No upcoming classes to cancel.")
         return
@@ -1540,7 +1553,7 @@ async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.edit_message_text("Invalid selection.")
         return
     # Use admin visibility to ensure cancelled or completed classes are excluded
-    upcoming_list = get_admin_visible_classes(student_key, student, count=8)
+    upcoming_list = get_admin_upcoming_classes(student_key, student, count=8)
     if index < 0 or index >= len(upcoming_list):
         await query.edit_message_text("Invalid selection.")
         return
@@ -1780,8 +1793,11 @@ def generate_dashboard_summary() -> str:
         if student.get("paused"):
             paused_students.append(student["name"])
         else:
-            # Admin view considers any unlogged class, including past ones
-            for dt in get_admin_visible_classes(sid, student, count=3):
+            # Consider both past and upcoming unlogged classes for today
+            candidates = get_admin_visible_classes(
+                sid, student, count=3
+            ) + get_admin_upcoming_classes(sid, student, count=3)
+            for dt in candidates:
                 if dt.astimezone(tz).date() == today_student:
                     today_classes.append(
                         f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}"
@@ -2254,7 +2270,7 @@ async def initiate_log_class(query, context, student_id, student):
 
 async def initiate_cancel_class_admin(query, context, student_id, student):
     # Admin-specific view ignores cancelled_dates and past logs
-    upcoming_list = get_admin_visible_classes(student_id, student, count=8)
+    upcoming_list = get_admin_upcoming_classes(student_id, student, count=8)
     if not upcoming_list:
         return await safe_edit_or_send(query, "No upcoming classes to cancel.")
     context.user_data["admin_cancel"] = {
@@ -3013,8 +3029,8 @@ async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Student not found.")
         return
 
-    # Retrieve admin-visible schedule: all unlogged classes
-    schedule = get_admin_visible_classes(
+    # Retrieve admin-visible schedule: all upcoming unlogged classes
+    schedule = get_admin_upcoming_classes(
         student_key, student, count=len(student.get("class_dates", []))
     )
 

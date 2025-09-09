@@ -57,13 +57,33 @@ def _parse_iso(dt_str: str) -> datetime:
     return dt
 
 
-def is_class_logged(student_id: str, iso_dt: str) -> bool:
-    """Return True if a log entry exists for ``student_id`` at ``iso_dt``."""
+def is_class_logged(
+    student_id: str, iso_dt: str, logs: Optional[List[Dict[str, Any]]] = None
+) -> bool:
+    """Return True if a class log exists for ``student_id`` at ``iso_dt``.
+
+    Only class-related statuses are considered. ``logs`` may be provided to avoid
+    reloading the file repeatedly.
+    """
+
     target = _parse_iso(iso_dt)
     sid = str(student_id)
-    for entry in load_logs():
+    if logs is None:
+        logs = load_logs()
+    for entry in logs:
         entry_sid = str(entry.get("student") or entry.get("student_id") or "")
         if entry_sid != sid:
+            continue
+        status = (entry.get("status") or entry.get("type") or "").lower()
+        if status.startswith("class_"):
+            status = status[6:]
+        if status not in {
+            "completed",
+            "cancelled_early",
+            "cancelled_late",
+            "rescheduled",
+            "removed",
+        }:
             continue
         dt_val = entry.get("date") or entry.get("at")
         if not dt_val:
