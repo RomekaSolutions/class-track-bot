@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, time
 
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
 def fmt_class_label(iso_str: str) -> str:
@@ -10,6 +10,8 @@ def fmt_class_label(iso_str: str) -> str:
 
 
 Slot = Tuple[int, int, int, object]
+
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def extract_weekly_pattern(dates: List[str]) -> List[Slot]:
@@ -60,3 +62,60 @@ def generate_from_pattern(anchor: datetime, pattern: List[Slot], count: int) -> 
         results.append(next_dt)
         current = next_dt
     return results
+
+
+def get_weekly_pattern_from_history(history: List[datetime]) -> Optional[List[Slot]]:
+    """Return a stable weekly pattern from recent ``history``.
+
+    Examines the last 6–10 classes and groups entries by weekday and
+    start time allowing a ±15 minute tolerance.  Groups occurring fewer
+    than twice are ignored.  If no stable groups remain, ``None`` is
+    returned.
+    """
+
+    recent = history[-10:]
+    if len(recent) < 6:
+        return None
+
+    groups = []
+    for dt in recent:
+        weekday = dt.weekday()
+        minutes = dt.hour * 60 + dt.minute
+        tz = dt.tzinfo
+        matched = False
+        for g in groups:
+            if (
+                g["weekday"] == weekday
+                and g["tz"] == tz
+                and abs(g["minutes"] - minutes) <= 15
+            ):
+                g["times"].append(minutes)
+                matched = True
+                break
+        if not matched:
+            groups.append({
+                "weekday": weekday,
+                "tz": tz,
+                "minutes": minutes,
+                "times": [minutes],
+            })
+
+    pattern: List[Slot] = []
+    for g in groups:
+        if len(g["times"]) >= 2:
+            avg = sum(g["times"]) / len(g["times"])
+            total_minutes = int(round(avg))
+            hour = total_minutes // 60
+            minute = total_minutes % 60
+            pattern.append((g["weekday"], hour, minute, g["tz"]))
+
+    pattern.sort(key=lambda x: (x[0], x[1], x[2]))
+    return pattern or None
+
+
+def slots_to_text(pattern: List[Slot]) -> str:
+    """Format ``pattern`` into human-readable string."""
+
+    return ", ".join(
+        f"{WEEKDAYS[w]} {h:02d}:{m:02d}" for w, h, m, _ in pattern
+    )
