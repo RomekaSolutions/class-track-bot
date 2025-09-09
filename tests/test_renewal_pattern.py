@@ -34,15 +34,15 @@ def _make_history_logs(start_monday, start_thursday, weeks=4):
         logs.append(
             {
                 "student_id": "1",
-                "type": "class_completed",
-                "at": (start_monday + timedelta(weeks=i)).isoformat(),
+                "status": "completed",
+                "date": (start_monday + timedelta(weeks=i)).isoformat(),
             }
         )
         logs.append(
             {
                 "student_id": "1",
-                "type": "class_completed",
-                "at": (start_thursday + timedelta(weeks=i)).isoformat(),
+                "status": "completed",
+                "date": (start_thursday + timedelta(weeks=i)).isoformat(),
             }
         )
     return logs
@@ -88,8 +88,8 @@ def test_no_pattern_fallback(monkeypatch):
     logs = [
         {
             "student_id": "1",
-            "type": "class_completed",
-            "at": (base + timedelta(days=i, hours=i)).isoformat(),
+            "status": "completed",
+            "date": (base + timedelta(days=i, hours=i)).isoformat(),
         }
         for i in range(8)
     ]
@@ -168,3 +168,56 @@ def test_renewal_broken_record_not_saved(monkeypatch):
     assert saved == {}
     assert student["classes_remaining"] == 0
     assert query.edited.startswith("Student record invalid")
+
+
+def test_pattern_from_status_logs_with_variance(monkeypatch):
+    monday1 = datetime(2025, 1, 6, 18, 0, tzinfo=timezone.utc)
+    thursday1 = datetime(2025, 1, 9, 17, 0, tzinfo=timezone.utc)
+    monday2 = datetime(2025, 1, 13, 18, 25, tzinfo=timezone(timedelta(hours=1)))
+    thursday2 = datetime(2025, 1, 16, 16, 40, tzinfo=timezone(timedelta(hours=1)))
+    logs = [
+        {"student_id": "1", "status": "completed", "date": monday1.isoformat()},
+        {"student_id": "1", "status": "completed", "date": thursday1.isoformat()},
+        {"student_id": "1", "status": "completed", "date": monday2.isoformat()},
+        {"student_id": "1", "status": "completed", "date": thursday2.isoformat()},
+    ]
+    monkeypatch.setattr(af.data_store, "load_logs", lambda: logs)
+    monkeypatch.setattr(
+        af.data_store,
+        "get_student_by_id",
+        lambda sid: {"class_dates": [], "cancelled_dates": [], "name": "A", "classes_remaining": 0},
+    )
+    history, pattern = af._history_and_pattern("1")
+    assert len(history) == 4
+    assert pattern is not None and len(pattern) == 2
+    mon = next(p for p in pattern if p[0] == 0)
+    thu = next(p for p in pattern if p[0] == 3)
+    assert mon[1] == 18 and 10 <= mon[2] <= 15
+    assert thu[1] == 16 and 45 <= thu[2] <= 55
+
+
+def test_pattern_fallback_to_class_dates(monkeypatch):
+    monday1 = datetime(2025, 1, 6, 18, 0, tzinfo=timezone.utc)
+    thursday1 = datetime(2025, 1, 9, 17, 0, tzinfo=timezone.utc)
+    logs = [
+        {"student_id": "1", "status": "completed", "date": monday1.isoformat()},
+        {"student_id": "1", "status": "completed", "date": thursday1.isoformat()},
+    ]
+    monkeypatch.setattr(af.data_store, "load_logs", lambda: logs)
+    class_dates = [
+        (monday1 + timedelta(weeks=2)).isoformat(),
+        (thursday1 + timedelta(weeks=2)).isoformat(),
+        (monday1 + timedelta(weeks=3)).isoformat(),
+        (thursday1 + timedelta(weeks=3)).isoformat(),
+    ]
+    student = {
+        "name": "A",
+        "classes_remaining": 0,
+        "class_dates": class_dates,
+        "cancelled_dates": [],
+    }
+    monkeypatch.setattr(af.data_store, "get_student_by_id", lambda sid: student)
+    history, pattern = af._history_and_pattern("1")
+    assert len(history) == 2
+    assert pattern is not None
+    assert {p[0] for p in pattern} == {0, 3}

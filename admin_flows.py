@@ -256,13 +256,25 @@ def _history_and_pattern(
             dt_str = event.get("at")
         elif event.get("type") == "class_rescheduled":
             dt_str = event.get("to")
+        elif event.get("status") in {"completed", "cancelled"}:
+            dt_str = event.get("date")
         if dt_str:
             try:
-                history.append(datetime.fromisoformat(dt_str))
+                history.append(_parse_iso(dt_str))
             except Exception:
                 continue
     history.sort()
     pattern = get_weekly_pattern_from_history(history)
+    if not pattern:
+        student = data_store.get_student_by_id(student_id)
+        if student and isinstance(student.get("class_dates"), list):
+            dates: List[datetime] = []
+            for iso in student.get("class_dates", []):
+                try:
+                    dates.append(_parse_iso(iso))
+                except Exception:
+                    continue
+            pattern = get_weekly_pattern_from_history(dates)
     return history, pattern
 
 
