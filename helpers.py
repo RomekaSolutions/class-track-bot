@@ -67,27 +67,26 @@ def generate_from_pattern(anchor: datetime, pattern: List[Slot], count: int) -> 
 def get_weekly_pattern_from_history(history: List[datetime]) -> Optional[List[Slot]]:
     """Return a stable weekly pattern from recent ``history``.
 
-    Examines the last 6–10 classes and groups entries by weekday and
-    start time allowing a ±15 minute tolerance.  Groups occurring fewer
-    than twice are ignored.  If no stable groups remain, ``None`` is
-    returned.
+    Examines the last 4–10 classes and groups entries by weekday and
+    start time allowing a ±30 minute tolerance.  Groups occurring fewer
+    than twice are ignored.  Timezone differences are ignored and
+    grouping is based purely on weekday and local time.  If no stable
+    groups remain, ``None`` is returned.
     """
 
     recent = history[-10:]
-    if len(recent) < 6:
+    if len(recent) < 4:
         return None
 
     groups = []
     for dt in recent:
         weekday = dt.weekday()
         minutes = dt.hour * 60 + dt.minute
-        tz = dt.tzinfo
         matched = False
         for g in groups:
             if (
                 g["weekday"] == weekday
-                and g["tz"] == tz
-                and abs(g["minutes"] - minutes) <= 15
+                and abs(g["minutes"] - minutes) <= 30
             ):
                 g["times"].append(minutes)
                 matched = True
@@ -95,7 +94,7 @@ def get_weekly_pattern_from_history(history: List[datetime]) -> Optional[List[Sl
         if not matched:
             groups.append({
                 "weekday": weekday,
-                "tz": tz,
+                "tz": dt.tzinfo,
                 "minutes": minutes,
                 "times": [minutes],
             })
