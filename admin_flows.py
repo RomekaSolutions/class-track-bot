@@ -456,35 +456,64 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def initiate_change_length(query, context, student_id: str, student: Dict[str, Any]):
-    await safe_edit_or_send(
-        query,
-        f"Coming soon: change length for {student.get('name', student_id)}",
-        reply_markup=_back_markup(student_id),
+    """Delegate to the existing /edit flow to change class length."""
+    # Import locally to avoid circular imports at module load time
+    import types
+    from class_track_bot import edit_menu_callback
+
+    # Reuse the /edit student logic by faking an ``edit:option:length`` callback
+    context.user_data["edit_student_key"] = student_id
+    fake_query = types.SimpleNamespace(
+        data="edit:option:length",
+        answer=query.answer,
+        edit_message_text=query.edit_message_text,
+        message=query.message,
     )
+    fake_update = types.SimpleNamespace(callback_query=fake_query, effective_user=query.from_user)
+    await edit_menu_callback(fake_update, context)
 
 
 async def initiate_edit_schedule(query, context, student_id: str, student: Dict[str, Any]):
-    await safe_edit_or_send(
-        query,
-        f"Coming soon: edit schedule for {student.get('name', student_id)}",
-        reply_markup=_back_markup(student_id),
+    """Show the /edit menu for the chosen student."""
+    import types
+    from class_track_bot import edit_pick_callback
+
+    # Emulate selecting the student through the standard edit workflow
+    fake_query = types.SimpleNamespace(
+        data=f"edit:pick:{student_id}",
+        answer=query.answer,
+        edit_message_text=query.edit_message_text,
+        message=query.message,
     )
+    fake_update = types.SimpleNamespace(callback_query=fake_query, effective_user=query.from_user)
+    await edit_pick_callback(fake_update, context)
 
 
 async def initiate_free_credit(query, context, student_id: str, student: Dict[str, Any]):
-    await safe_edit_or_send(
-        query,
-        f"Coming soon: free credit for {student.get('name', student_id)}",
-        reply_markup=_back_markup(student_id),
-    )
+    """Award a free class credit using existing logic."""
+    from class_track_bot import initiate_award_free
+
+    await initiate_award_free(query, context, student_id, student)
 
 
 async def initiate_remove_student(query, context, student_id: str, student: Dict[str, Any]):
-    await safe_edit_or_send(
-        query,
-        f"Coming soon: remove student {student.get('name', student_id)}",
-        reply_markup=_back_markup(student_id),
+    """Remove a student by delegating to the existing command logic."""
+    import types
+    from class_track_bot import remove_student_command
+
+    # ``remove_student_command`` expects command-style arguments and a message
+    old_args = getattr(context, "args", None)
+    context.args = [student_id, "confirm"]
+    fake_update = types.SimpleNamespace(
+        message=query.message,
+        effective_user=query.from_user,
     )
+    await remove_student_command(fake_update, context)
+    # Restore context.args to its previous state
+    if old_args is None:
+        delattr(context, "args")
+    else:
+        context.args = old_args
 
 
 async def initiate_adhoc_class(query, context, student_id: str, student: Dict[str, Any]):
@@ -518,8 +547,9 @@ async def handle_student_action(update: Update, context: ContextTypes.DEFAULT_TY
     if not query:
         return
     await query.answer()
+    logging.debug("handle_student_action data=%s", query.data)
     match = re.match(
-        r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
+        r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):([^:]+)$",
         query.data,
     )
     if not match:
