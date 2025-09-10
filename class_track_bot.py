@@ -266,6 +266,7 @@ def ensure_numeric_student_ids(students: Dict[str, Any]) -> bool:
     """Ensure all keys and ``telegram_id`` values are numeric strings."""
 
     changed = False
+    flagged = False
     new_students: Dict[str, Any] = {}
     for key, student in list(students.items()):
         tid = student.get("telegram_id")
@@ -276,13 +277,19 @@ def ensure_numeric_student_ids(students: Dict[str, Any]) -> bool:
             sid = str(int(key))
             student["telegram_id"] = int(sid)
         if sid is None:
-            changed = True
+            handle = normalize_handle(student.get("telegram_handle")) or normalize_handle(key)
+            student["telegram_handle"] = handle
+            student["needs_id"] = True
+            new_students[handle] = student
+            flagged = True
             continue
         if normalize_handle(student.get("telegram_handle")):
             student["telegram_handle"] = normalize_handle(student.get("telegram_handle"))
         new_students[sid] = student
         if sid != str(key):
             changed = True
+    if flagged:
+        changed = True
     if changed:
         students.clear()
         students.update(new_students)
@@ -780,6 +787,8 @@ def schedule_student_reminders(
     reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
 ) -> None:
     """Schedule reminder jobs for all future classes of a student."""
+    if not student.get("telegram_id"):
+        return
     prefix = f"class_reminder:{student_key}:"
     # remove existing reminder jobs for this student
     for job in application.job_queue.jobs():
@@ -2443,6 +2452,8 @@ async def list_students_command(update: Update, context: ContextTypes.DEFAULT_TY
             ident = f"id {s['telegram_id']}"
         else:
             ident = "no handle"
+        if s.get("needs_id"):
+            ident += " (needs ID)"
         lines.append(f"- {s['name']} ({ident})")
 
     await update.message.reply_text("\n".join(lines))
@@ -2461,6 +2472,8 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         label = name
         if handle:
             label += f" @{handle}"
+        if student.get("needs_id"):
+            label += " (needs ID)"
         buttons.append([InlineKeyboardButton(label, callback_data=f"edit:pick:{key}")])
     if not buttons:
         if update.message:
@@ -3147,12 +3160,14 @@ async def datacheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if s.get("telegram_id") and key != str(s.get("telegram_id"))
     )
     pending_cancel = sum(1 for s in students.values() if s.get("pending_cancel"))
+    needs_id = [(k, s) for k, s in students.items() if s.get("needs_id")]
     logging.info(
-        "datacheck stats total=%s both=%s mismatch=%s pending_cancel=%s",
+        "datacheck stats total=%s both=%s mismatch=%s pending_cancel=%s needs_id=%s",
         total,
         both_fields,
         mismatch,
         pending_cancel,
+        len(needs_id),
     )
 
     canonical: Dict[str, str] = {}
@@ -3214,9 +3229,51 @@ async def datacheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         save_students(students)
     if logs_fixed:
         save_logs(logs)
+    lines = [
+        f"DataCheck: students={total}, rekeyed={rekeyed}, logs_fixed={logs_fixed}, pending_cancel={pending_cancel}, needs_id={len(needs_id)}"
+    ]
+    if needs_id:
+        lines.append("Needs ID:")
+        for key, stu in needs_id:
+            handle = stu.get("telegram_handle") or key
+            name = stu.get("name", "")
+            lines.append(f"- {handle} {name}".strip())
+    await update.message.reply_text("\n".join(lines))
 
+
+@admin_only
+async def resolveids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    students = load_students()
+    logs = load_logs()
+    resolved = 0
+    failed = 0
+    for key, student in list(students.items()):
+        if not student.get("needs_id"):
+            continue
+        handle = student.get("telegram_handle") or normalize_handle(key)
+        if not handle:
+            failed += 1
+            continue
+        try:
+            chat = await context.application.bot.get_chat(f"@{handle}")
+            numeric_id = chat.id
+        except Exception:
+            failed += 1
+            continue
+        new_key = str(numeric_id)
+        student["telegram_id"] = numeric_id
+        student.pop("needs_id", None)
+        students[new_key] = student
+        if new_key != key:
+            students.pop(key, None)
+        for entry in logs:
+            if entry.get("student") in {key, f"@{handle}"}:
+                entry["student"] = new_key
+        resolved += 1
+    save_students(students)
+    save_logs(logs)
     await update.message.reply_text(
-        f"DataCheck: students={total}, rekeyed={rekeyed}, logs_fixed={logs_fixed}, pending_cancel={pending_cancel}"
+        f"ResolveIDs: resolved={resolved}, failed={failed}"
     )
 
 
@@ -3351,7 +3408,10 @@ def display_name(student_id: str, student: dict) -> str:
     name = student.get("name") or handle or student_id
     if handle and not handle.startswith("@"):
         handle = "@" + handle
-    return f"{name} {handle or ''}".strip()
+    label = f"{name} {handle or ''}".strip()
+    if student.get("needs_id"):
+        label += " (needs ID)"
+    return label
 
 
 def build_students_page_kb(
@@ -4367,6 +4427,7 @@ def main() -> None:
     application.add_handler(CommandHandler("downloadmonth", download_month_command))
     application.add_handler(CommandHandler("selftest", selftest_command))
     application.add_handler(CommandHandler("datacheck", datacheck_command))
+    application.add_handler(CommandHandler("resolveids", resolveids_command))
     application.add_handler(CommandHandler("checklogs", checklogs_command))
     application.add_handler(CommandHandler("fixlogs", fixlogs_command))
     application.add_handler(CommandHandler("nukepending", nukepending_command))

@@ -16,10 +16,11 @@ def _normalise_handle(handle: Optional[str]) -> Optional[str]:
 
 
 def _normalise_student_record(key: str, student: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """Return ``(id_str, student)`` if a numeric ID can be determined."""
+    """Return canonical ``(key, student)`` preserving unresolved handles."""
 
     if not isinstance(student, dict):
         return None
+
     tid = student.get("telegram_id")
     sid: Optional[str] = None
     if isinstance(tid, int) or (isinstance(tid, str) and str(tid).isdigit()):
@@ -27,8 +28,14 @@ def _normalise_student_record(key: str, student: Dict[str, Any]) -> Optional[Tup
     elif str(key).isdigit():
         sid = str(int(key))
         student["telegram_id"] = int(sid)
+
     if sid is None:
-        return None
+        # Preserve handle keyed students, flagging for resolution later
+        handle = _normalise_handle(student.get("telegram_handle") or key)
+        student["telegram_handle"] = handle
+        student["needs_id"] = True
+        return handle, student
+
     student["telegram_handle"] = _normalise_handle(student.get("telegram_handle"))
     return sid, student
 
