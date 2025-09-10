@@ -4224,7 +4224,7 @@ def build_application() -> Application:
     app.add_handler(
         CallbackQueryHandler(
             handle_student_action,
-            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
+            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):[^:]+$",
         )
     )
     app.add_handler(
@@ -4336,7 +4336,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             handle_student_action,
-            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
+            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):[^:]+$",
         )
     )
     application.add_handler(
