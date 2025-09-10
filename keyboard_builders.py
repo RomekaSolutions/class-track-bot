@@ -39,6 +39,8 @@ def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple
     """Return a detailed summary for ``student`` and the admin submenu."""
 
     name = student.get("name", student_id)
+    if student.get("needs_id"):
+        name += " (needs ID)"
     remaining = student.get("classes_remaining", 0)
 
     # Upcoming class dates – show at most the next three entries
