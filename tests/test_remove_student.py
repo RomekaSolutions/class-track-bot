@@ -1,5 +1,6 @@
 import asyncio
 import json
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -28,43 +29,38 @@ def make_context(args):
     )
 
 
-def test_remove_student_keeps_duplicates(tmp_path, monkeypatch):
+def test_remove_student_keeps_other_students(tmp_path, monkeypatch):
     data = {
-        "1": {"name": "A1", "telegram_id": 100, "telegram_handle": "alice", "paused": False},
-        "2": {"name": "A2", "telegram_id": 100, "telegram_handle": "alice_dup", "paused": False},
-        "3": {"name": "A3", "telegram_id": 101, "telegram_handle": "alice", "paused": False},
+        "100": {"name": "A1", "telegram_id": 100, "telegram_handle": "alice", "paused": False},
+        "101": {"name": "A3", "telegram_id": 101, "telegram_handle": "alice", "paused": False},
     }
     students_file, logs_file = setup_files(tmp_path, data)
     monkeypatch.setattr(bot, "STUDENTS_FILE", str(students_file))
     monkeypatch.setattr(bot, "LOGS_FILE", str(logs_file))
-    monkeypatch.setattr(bot, "dedupe_student_keys", lambda s: False)
 
     reply = AsyncMock()
     update = make_update(reply)
-    context = make_context(["1", "confirm"])
+    context = make_context(["100", "confirm"])
 
     asyncio.run(bot.remove_student_command(update, context))
 
     students = json.loads(students_file.read_text())
-    assert "1" not in students
-    assert "2" in students
-    assert "3" in students
+    assert "100" not in students
+    assert "101" in students
 
 
-def test_remove_student_purge_deletes_duplicates(tmp_path, monkeypatch):
+def test_remove_student_purge(tmp_path, monkeypatch):
     data = {
-        "1": {"name": "A1", "telegram_id": 100, "telegram_handle": "alice", "paused": False},
-        "2": {"name": "A2", "telegram_id": 100, "telegram_handle": "alice_dup", "paused": False},
-        "3": {"name": "A3", "telegram_id": 101, "telegram_handle": "alice", "paused": False},
+        "100": {"name": "A1", "telegram_id": 100, "telegram_handle": "alice", "paused": False},
+        "101": {"name": "A3", "telegram_id": 101, "telegram_handle": "alice", "paused": False},
     }
     students_file, logs_file = setup_files(tmp_path, data)
     monkeypatch.setattr(bot, "STUDENTS_FILE", str(students_file))
     monkeypatch.setattr(bot, "LOGS_FILE", str(logs_file))
-    monkeypatch.setattr(bot, "dedupe_student_keys", lambda s: False)
 
     reply = AsyncMock()
     update = make_update(reply)
-    context = make_context(["1", "confirm", "purge"])
+    context = make_context(["100", "confirm", "purge"])
 
     asyncio.run(bot.remove_student_command(update, context))
 

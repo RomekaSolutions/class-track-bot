@@ -262,6 +262,33 @@ def dedupe_student_keys(students: Dict[str, Any]) -> bool:
     return changed
 
 
+def ensure_numeric_student_ids(students: Dict[str, Any]) -> bool:
+    """Ensure all keys and ``telegram_id`` values are numeric strings."""
+
+    changed = False
+    new_students: Dict[str, Any] = {}
+    for key, student in list(students.items()):
+        tid = student.get("telegram_id")
+        sid: Optional[str] = None
+        if isinstance(tid, int) or (isinstance(tid, str) and str(tid).isdigit()):
+            sid = str(int(tid))
+        elif str(key).isdigit():
+            sid = str(int(key))
+            student["telegram_id"] = int(sid)
+        if sid is None:
+            changed = True
+            continue
+        if normalize_handle(student.get("telegram_handle")):
+            student["telegram_handle"] = normalize_handle(student.get("telegram_handle"))
+        new_students[sid] = student
+        if sid != str(key):
+            changed = True
+    if changed:
+        students.clear()
+        students.update(new_students)
+    return changed
+
+
 def resolve_student(students: Dict[str, Any], key: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Return (canonical_key, student) for a given ID or handle input.
 
@@ -420,6 +447,8 @@ def load_students() -> Dict[str, Any]:
         changed = True
     if dedupe_student_keys(students):
         changed = True
+    if ensure_numeric_student_ids(students):
+        changed = True
     if changed:
         # One-time migration: persist upgraded student records
         save_students(students)
@@ -427,7 +456,9 @@ def load_students() -> Dict[str, Any]:
 
 
 def save_students(students: Dict[str, Any]) -> None:
-    """Persist students dict to JSON."""
+    """Persist students dict to JSON enforcing numeric keys."""
+
+    ensure_numeric_student_ids(students)
     with open(STUDENTS_FILE, "w", encoding="utf-8") as f:
         json.dump(students, f, indent=2, ensure_ascii=False, sort_keys=True)
 
@@ -441,13 +472,21 @@ def normalize_log_students(
     """
 
     changed = False
-    for entry in logs:
+    for entry in list(logs):
         student_field = entry.get("student")
         if student_field is None:
             continue
         normalized = normalize_handle(str(student_field))
         canonical, _ = resolve_student(students, normalized)
-        new_key = canonical or normalized
+        if canonical is None:
+            if normalized.isdigit():
+                new_key = normalized
+            else:
+                logs.remove(entry)
+                changed = True
+                continue
+        else:
+            new_key = canonical
         if entry.get("student") != new_key:
             entry["student"] = new_key
             changed = True
@@ -1148,8 +1187,19 @@ async def add_handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         handle = handle[1:]
     if handle.isdigit():
         context.user_data["telegram_id"] = int(handle)
+        context.user_data["telegram_handle"] = None
     else:
-        context.user_data["telegram_handle"] = normalize_handle(handle)
+        normalized = normalize_handle(handle)
+        context.user_data["telegram_handle"] = normalized
+        try:
+            chat = await context.application.bot.get_chat(f"@{normalized}")
+            context.user_data["telegram_id"] = int(chat.id)
+        except Exception:
+            context.user_data["telegram_id"] = None
+    if not context.user_data.get("telegram_id"):
+        await update.message.reply_text(
+            "Could not resolve numeric Telegram ID. Please enter the numeric ID:")
+        return ADD_HANDLE
     await update.message.reply_text("Enter the plan price (numerical value, e.g., 3500):")
     return ADD_PRICE
 
@@ -1253,7 +1303,10 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     students = load_students()
     telegram_id = context.user_data.get("telegram_id")
     handle = normalize_handle(context.user_data.get("telegram_handle"))
-    key = str(telegram_id) if telegram_id else handle
+    if not telegram_id:
+        await update.message.reply_text("A numeric Telegram ID is required. Aborting.")
+        return ConversationHandler.END
+    key = str(int(telegram_id))
     if key in students:
         await update.message.reply_text("A student with this identifier already exists. Aborting.")
         return ConversationHandler.END
@@ -1268,7 +1321,7 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     student = {
         "name": context.user_data.get("name"),
-        "telegram_id": telegram_id,
+        "telegram_id": int(telegram_id),
         "telegram_handle": handle,
         "classes_remaining": context.user_data.get("classes_remaining"),
         "plan_price": context.user_data.get("plan_price"),

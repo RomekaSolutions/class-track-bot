@@ -1,27 +1,76 @@
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 STUDENTS_FILE = "students.json"
 LOGS_FILE = "logs.json"
 
 
+def _normalise_handle(handle: Optional[str]) -> Optional[str]:
+    """Return ``handle`` lowercased without a leading ``@``."""
+
+    if handle is None:
+        return None
+    return str(handle).lstrip("@").lower()
+
+
+def _normalise_student_record(key: str, student: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Return ``(id_str, student)`` if a numeric ID can be determined."""
+
+    if not isinstance(student, dict):
+        return None
+    tid = student.get("telegram_id")
+    sid: Optional[str] = None
+    if isinstance(tid, int) or (isinstance(tid, str) and str(tid).isdigit()):
+        sid = str(int(tid))
+    elif str(key).isdigit():
+        sid = str(int(key))
+        student["telegram_id"] = int(sid)
+    if sid is None:
+        return None
+    student["telegram_handle"] = _normalise_handle(student.get("telegram_handle"))
+    return sid, student
+
+
 def load_students() -> Dict[str, Any]:
-    """Return the full students mapping from disk."""
+    """Return the full students mapping from disk ensuring numeric keys."""
     if not os.path.exists(STUDENTS_FILE):
         return {}
     try:
         with open(STUDENTS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
     except Exception:
         return {}
 
+    cleaned: Dict[str, Any] = {}
+    changed = False
+    for key, student in (raw or {}).items():
+        result = _normalise_student_record(str(key), student)
+        if result is None:
+            changed = True
+            continue
+        new_key, norm_student = result
+        cleaned[new_key] = norm_student
+        if new_key != str(key):
+            changed = True
+    if changed:
+        save_students(cleaned)
+    return cleaned
+
 
 def save_students(data: Dict[str, Any]) -> None:
-    """Persist ``data`` to ``STUDENTS_FILE``."""
+    """Persist ``data`` to ``STUDENTS_FILE`` ensuring numeric keys."""
+
+    cleaned: Dict[str, Any] = {}
+    for key, student in list(data.items()):
+        result = _normalise_student_record(str(key), student)
+        if result is None:
+            continue
+        new_key, norm_student = result
+        cleaned[new_key] = norm_student
     with open(STUDENTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
+        json.dump(cleaned, f, indent=2, sort_keys=True)
 
 
 def get_student_by_id(student_id: str, safe: bool = True) -> Optional[Dict[str, Any]]:
@@ -40,29 +89,134 @@ def get_student_by_id(student_id: str, safe: bool = True) -> Optional[Dict[str, 
         raise
 
 
+def _resolve_student_id(value: Any, students: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Return numeric student id string for ``value`` if possible."""
+
+    if value is None:
+        return None
+    sid = str(value)
+    if sid.isdigit():
+        return sid
+    handle = _normalise_handle(sid)
+    if students is None:
+        students = load_students()
+    for key, stu in students.items():
+        if _normalise_handle(stu.get("telegram_handle")) == handle:
+            return key
+    return None
+
+
 def load_logs() -> List[Dict[str, Any]]:
-    """Return the list of log records from disk."""
+    """Return the list of log records from disk ensuring numeric IDs."""
     if not os.path.exists(LOGS_FILE):
         return []
     try:
         with open(LOGS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
     except Exception:
         return []
 
+    students = load_students()
+    cleaned: List[Dict[str, Any]] = []
+    changed = False
+    for entry in raw:
+        sid = entry.get("student") or entry.get("student_id")
+        resolved = _resolve_student_id(sid, students)
+        if resolved is None:
+            changed = True
+            continue
+        if sid != resolved:
+            changed = True
+        entry["student"] = resolved
+        entry.pop("student_id", None)
+        cleaned.append(entry)
+    if changed:
+        save_logs(cleaned)
+    return cleaned
+
+
+def save_logs(logs: List[Dict[str, Any]]) -> None:
+    """Persist ``logs`` ensuring ``student`` fields are numeric."""
+
+    students = load_students()
+    cleaned: List[Dict[str, Any]] = []
+    for entry in logs:
+        sid = entry.get("student") or entry.get("student_id")
+        resolved = _resolve_student_id(sid, students)
+        if resolved is None:
+            continue
+        entry["student"] = resolved
+        entry.pop("student_id", None)
+        cleaned.append(entry)
+    with open(LOGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(cleaned, f, indent=2, sort_keys=True)
+
 
 def append_log(event: Dict[str, Any]) -> None:
-    """Append an event to ``LOGS_FILE``."""
-    logs: List[Dict[str, Any]] = []
+    """Append an event to ``LOGS_FILE`` ensuring data integrity."""
+
+    logs = load_logs()
+    logs.append(event)
+    save_logs(logs)
+
+
+def migrate_student_records() -> None:
+    """Rekey students and logs to use numeric Telegram IDs."""
+
+    # --- migrate students ---
+    raw_students: Dict[str, Any] = {}
+    if os.path.exists(STUDENTS_FILE):
+        try:
+            with open(STUDENTS_FILE, "r", encoding="utf-8") as f:
+                raw_students = json.load(f)
+        except Exception:
+            raw_students = {}
+
+    cleaned_students: Dict[str, Any] = {}
+    rekeyed = 0
+    for key, student in raw_students.items():
+        result = _normalise_student_record(str(key), student)
+        if result is None:
+            continue
+        new_key, norm_student = result
+        cleaned_students[new_key] = norm_student
+        if new_key != str(key):
+            rekeyed += 1
+
+    with open(STUDENTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(cleaned_students, f, indent=2, sort_keys=True)
+
+    # --- migrate logs ---
+    raw_logs: List[Dict[str, Any]] = []
     if os.path.exists(LOGS_FILE):
         try:
             with open(LOGS_FILE, "r", encoding="utf-8") as f:
-                logs = json.load(f)
+                raw_logs = json.load(f)
         except Exception:
-            logs = []
-    logs.append(event)
+            raw_logs = []
+
+    updated = 0
+    skipped = 0
+    migrated_logs: List[Dict[str, Any]] = []
+    for entry in raw_logs:
+        sid = entry.get("student") or entry.get("student_id")
+        resolved = _resolve_student_id(sid, cleaned_students)
+        if resolved is None:
+            skipped += 1
+            continue
+        if sid != resolved:
+            updated += 1
+        entry["student"] = resolved
+        entry.pop("student_id", None)
+        migrated_logs.append(entry)
+
     with open(LOGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(logs, f, indent=2, sort_keys=True)
+        json.dump(migrated_logs, f, indent=2, sort_keys=True)
+
+    print(f"Handles rekeyed: {rekeyed}")
+    print(f"Logs updated: {updated}")
+    if skipped:
+        print(f"Logs skipped: {skipped}")
 
 
 def _parse_iso(dt_str: str) -> datetime:
