@@ -25,6 +25,9 @@ def test_resolveids_flow(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "STUDENTS_FILE", str(sf))
     monkeypatch.setattr(bot, "LOGS_FILE", str(lf))
 
+    calls = []
+    monkeypatch.setattr(bot, "schedule_student_reminders", lambda app, key, s: calls.append(key))
+
     students = bot.load_students()
     assert "test_handle" in students
     assert students["test_handle"].get("needs_id")
@@ -54,3 +57,4 @@ def test_resolveids_flow(tmp_path, monkeypatch):
     logs = json.loads(lf.read_text())
     assert logs[0]["student"] == "99"
     get_chat.assert_awaited_once_with("@test_handle")
+    assert calls == ["99"]

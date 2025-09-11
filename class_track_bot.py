@@ -1176,7 +1176,11 @@ def admin_only(func):
 @admin_only
 async def add_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Initiate the conversation to add a new student."""
-    await update.message.reply_text(
+    q = update.callback_query
+    if q:
+        await q.answer()
+    message = update.effective_message
+    await message.reply_text(
         "Adding a new student. Please enter the student's name:",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -1197,18 +1201,18 @@ async def add_handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if handle.isdigit():
         context.user_data["telegram_id"] = int(handle)
         context.user_data["telegram_handle"] = None
+        context.user_data.pop("needs_id", None)
     else:
         normalized = normalize_handle(handle)
         context.user_data["telegram_handle"] = normalized
         try:
             chat = await context.application.bot.get_chat(f"@{normalized}")
             context.user_data["telegram_id"] = int(chat.id)
+            context.user_data["telegram_handle"] = chat.username or normalized
+            context.user_data.pop("needs_id", None)
         except Exception:
             context.user_data["telegram_id"] = None
-    if not context.user_data.get("telegram_id"):
-        await update.message.reply_text(
-            "Could not resolve numeric Telegram ID. Please enter the numeric ID:")
-        return ADD_HANDLE
+            context.user_data["needs_id"] = True
     await update.message.reply_text("Enter the plan price (numerical value, e.g., 3500):")
     return ADD_PRICE
 
@@ -1312,10 +1316,7 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     students = load_students()
     telegram_id = context.user_data.get("telegram_id")
     handle = normalize_handle(context.user_data.get("telegram_handle"))
-    if not telegram_id:
-        await update.message.reply_text("A numeric Telegram ID is required. Aborting.")
-        return ConversationHandler.END
-    key = str(int(telegram_id))
+    key = str(int(telegram_id)) if telegram_id else handle
     if key in students:
         await update.message.reply_text("A student with this identifier already exists. Aborting.")
         return ConversationHandler.END
@@ -1330,7 +1331,7 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     student = {
         "name": context.user_data.get("name"),
-        "telegram_id": int(telegram_id),
+        "telegram_id": int(telegram_id) if telegram_id else None,
         "telegram_handle": handle,
         "classes_remaining": context.user_data.get("classes_remaining"),
         "plan_price": context.user_data.get("plan_price"),
@@ -1345,11 +1346,20 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         "reschedule_credit": 0,
         "notes": [],
     }
+    if not telegram_id:
+        student["needs_id"] = True
     ensure_future_class_dates(student)
     students[key] = student
     save_students(students)
-    schedule_student_reminders(context.application, key, student)
-    await update.message.reply_text(f"Added student {context.user_data.get('name')} successfully!")
+    if telegram_id:
+        schedule_student_reminders(context.application, key, student)
+        await update.message.reply_text(
+            f"Added student {context.user_data.get('name')} successfully!"
+        )
+    else:
+        await update.message.reply_text(
+            "Student added with handle only. Reminders will start once they /start the bot or you run /resolveids."
+        )
     return ConversationHandler.END
 
 
@@ -2161,12 +2171,6 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             students = load_students()
             kb = build_students_page_kb(students, page=0)
             return await safe_edit_or_send(q, "👥 Students", reply_markup=kb)
-        elif action == "addstudent":
-            await q.answer()
-            return await safe_edit_or_send(
-                q,
-                "➕ Add Student\nUse the existing /edit flow to add a new student (submenu coming soon).",
-            )
         elif action == "logs":
             await q.answer()
             return await safe_edit_or_send(
@@ -3269,6 +3273,7 @@ async def resolveids_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         for entry in logs:
             if entry.get("student") in {key, f"@{handle}"}:
                 entry["student"] = new_key
+        schedule_student_reminders(context.application, new_key, student)
         resolved += 1
     save_students(students)
     save_logs(logs)
@@ -4398,7 +4403,10 @@ def main() -> None:
         return ConversationHandler.END
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("addstudent", add_student_command)],
+        entry_points=[
+            CommandHandler("addstudent", add_student_command),
+            CallbackQueryHandler(add_student_command, pattern=r"^admin:addstudent$", block=True),
+        ],
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_HANDLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_handle)],
