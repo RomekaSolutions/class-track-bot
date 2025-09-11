@@ -419,6 +419,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     stu = students.get(str(student_id), {})
     stu["class_dates"] = [dt.isoformat() for dt in generated]
     stu["classes_remaining"] = qty
+    stu["renewal_date"] = generated[-1].isoformat()
     stu["cancelled_dates"] = stu.get("cancelled_dates", [])
     valid, reason = validate_student_record(stu)
     if not valid:
@@ -442,22 +443,14 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "qty": qty,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "schedule": "pattern_reused",
+            "renewal_date": generated[-1].isoformat(),
         }
     )
-
-    from class_track_bot import (
-        schedule_student_reminders,
-        send_low_balance_if_threshold,
-        schedule_final_set_notice,
-    )
-    schedule_student_reminders(context.application, student_id, stu)
-    await send_low_balance_if_threshold(context.application, student_id, stu)
-    schedule_final_set_notice(context.application, student_id, stu)
 
     text, markup = keyboard_builders.build_student_detail_view(student_id, stu)
     msg = (
         f"Renewed {qty} for {stu.get('name', student_id)}. "
-        f"Set ends: {generated[-1].date().isoformat()}."
+        f"New renewal date: {generated[-1].date().isoformat()}."
     )
     await safe_edit_or_send(query, f"{msg}\n\n{text}", reply_markup=markup)
 
@@ -684,15 +677,6 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
         iso_dt = payload
         cutoff = student.get("cutoff_hours", 24)
         data_store.cancel_single_class(student_id, iso_dt, cutoff)
-        student = data_store.get_student_by_id(student_id)
-        from class_track_bot import (
-            schedule_student_reminders,
-            send_low_balance_if_threshold,
-            schedule_final_set_notice,
-        )
-        schedule_student_reminders(context.application, student_id, student)
-        await send_low_balance_if_threshold(context.application, student_id, student)
-        schedule_final_set_notice(context.application, student_id, student)
         msg = f"Class at {iso_dt} cancelled."
         await safe_edit_or_send(query, msg, reply_markup=_back_markup(student_id))
         return
@@ -718,12 +702,6 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
             )
             return
         student = data_store.get_student_by_id(student_id)
-        from class_track_bot import (
-            schedule_student_reminders,
-            schedule_final_set_notice,
-        )
-        schedule_student_reminders(context.application, student_id, student)
-        schedule_final_set_notice(context.application, student_id, student)
         text, markup = keyboard_builders.build_student_detail_view(student_id, student)
         msg = f"Class moved from {iso_dt} to {new_iso}.\n\n{text}"
         await safe_edit_or_send(query, msg, reply_markup=markup)
@@ -758,34 +736,16 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             msg = f"Log removed for {iso_dt}."
         else:
             msg = "No matching log entry found."
-    elif action == "COMPLETE":
-        data_store.mark_class_completed(student_id, iso_dt)
-        student = data_store.get_student_by_id(student_id)
-        from class_track_bot import (
-            schedule_student_reminders,
-            send_low_balance_if_threshold,
-            schedule_final_set_notice,
-        )
-        schedule_student_reminders(context.application, student_id, student)
-        await send_low_balance_if_threshold(context.application, student_id, student)
-        schedule_final_set_notice(context.application, student_id, student)
-        msg = f"Class at {iso_dt} logged as completed."
-    elif action in {"CANCEL_EARLY", "CANCEL_LATE"}:
-        cutoff = 99999 if action == "CANCEL_EARLY" else 0
-        data_store.cancel_single_class(student_id, iso_dt, cutoff)
-        student = data_store.get_student_by_id(student_id)
-        from class_track_bot import (
-            schedule_student_reminders,
-            send_low_balance_if_threshold,
-            schedule_final_set_notice,
-        )
-        schedule_student_reminders(context.application, student_id, student)
-        await send_low_balance_if_threshold(context.application, student_id, student)
-        schedule_final_set_notice(context.application, student_id, student)
-        label = "cancelled late" if action == "CANCEL_LATE" else "cancelled early"
-        msg = f"Class at {iso_dt} logged as {label}."
     else:
-        data_store.log_class_status(student_id, iso_dt, "rescheduled")
-        msg = f"Class at {iso_dt} logged as rescheduled."
+        status_map = {
+            "COMPLETE": "completed",
+            "CANCEL_EARLY": "cancelled_early",
+            "CANCEL_LATE": "cancelled_late",
+            "RESCHEDULED": "rescheduled",
+        }
+        status = status_map[action]
+        data_store.log_class_status(student_id, iso_dt, status)
+        # TODO: allow picking a new date when rescheduling in the future
+        msg = f"Class at {iso_dt} logged as {status.replace('_', ' ')}."
 
     await safe_edit_or_send(query, msg, reply_markup=_back_markup(student_id))

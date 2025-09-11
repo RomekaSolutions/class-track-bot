@@ -186,20 +186,6 @@ def fmt_bkk(dt, add_label: bool = False):
         text += " ICT"
     return text
 
-
-def _parse_iso(dt_str: str) -> datetime:
-    """Parse an ISO timestamp string into a timezone-aware ``datetime``."""
-    dt = datetime.fromisoformat(dt_str)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
-def get_last_class(student: Dict[str, Any]):
-    """Return the last scheduled class as a ``datetime`` or ``None``."""
-    dates = [_parse_iso(x) for x in student.get("class_dates", []) if x]
-    return max(dates) if dates else None
-
 # Weekday helpers used throughout scheduling utilities
 WEEKDAY_NAMES = [
     "Monday",
@@ -437,12 +423,14 @@ def migrate_student_dates(students: Dict[str, Any]) -> bool:
 (
     ADD_NAME,
     ADD_HANDLE,
+    ADD_PRICE,
     ADD_CLASSES,
     ADD_SCHEDULE,
     ADD_CUTOFF,
     ADD_WEEKS,
     ADD_DURATION,
-) = range(7)
+    ADD_RENEWAL,
+) = range(9)
 
 def load_students() -> Dict[str, Any]:
     """Load students from the JSON file and normalize legacy records."""
@@ -577,6 +565,16 @@ def parse_schedule(
     return results
 
 
+def parse_renewal_date(date_str: str) -> Optional[str]:
+    """Validate a date string in YYYY‑MM‑DD format.  Returns the same
+    string if valid, otherwise None."""
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+        return date_str
+    except ValueError:
+        return None
+
+
 def parse_day_time(text: str) -> Optional[str]:
     """Validate and normalize a string like ``"Monday 17:00"``.
 
@@ -652,6 +650,13 @@ def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List
     """
     now = ensure_bangkok(datetime.now())
     cancelled = set(student.get("cancelled_dates", []))
+    renewal_date = None
+    renewal_str = student.get("renewal_date")
+    if renewal_str:
+        try:
+            renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
+        except ValueError:
+            renewal_date = None
     results: List[datetime] = []
     for item in student.get("class_dates", []):
         try:
@@ -664,6 +669,8 @@ def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List
         if dt <= now:
             continue
         if item in cancelled or dt.isoformat() in cancelled:
+            continue
+        if renewal_date and dt.date() > renewal_date:
             continue
         results.append(dt)
     results.sort()
@@ -795,57 +802,6 @@ def schedule_student_reminders(
         )
 
 
-async def send_low_balance_if_threshold(app: Application, student_key: str, student: Dict[str, Any]):
-    """Warn when a student reaches the low balance threshold."""
-    remaining = student.get("classes_remaining")
-    if remaining != 2:
-        return
-    chat_id = student.get("telegram_id")
-    msg = "You have 2 classes remaining in your current set."
-    if chat_id:
-        try:
-            await app.bot.send_message(chat_id=chat_id, text=msg)
-        except Exception:
-            logging.warning("Failed to send low balance notice to %s", student.get("name"))
-    notice = f"{student.get('name')} has 2 classes remaining."
-    for admin_id in ADMIN_IDS:
-        try:
-            await app.bot.send_message(chat_id=admin_id, text=notice)
-        except Exception:
-            continue
-
-
-def schedule_final_set_notice(app: Application, student_key: str, student: Dict[str, Any], offset: timedelta = timedelta(hours=1)) -> None:
-    """Schedule a notice before the final class in the current set."""
-    last_class = get_last_class(student)
-    if not last_class:
-        return
-    run_time = last_class - offset
-    job_name = f"final_notice:{student_key}"
-    for job in app.job_queue.jobs():
-        if job.name == job_name:
-            job.schedule_removal()
-    app.job_queue.run_once(send_final_set_notice, when=run_time, name=job_name, data={"student_key": student_key})
-
-
-async def send_final_set_notice(context: ContextTypes.DEFAULT_TYPE):
-    student_key = context.job.data.get("student_key")
-    student = data_store.get_student_by_id(student_key)
-    if not student:
-        return
-    chat_id = student.get("telegram_id")
-    if not chat_id:
-        return
-    last_class = get_last_class(student)
-    if not last_class:
-        return
-    msg = f"Final class of your current set is at {fmt_bkk(last_class)} today. Good luck!"
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=msg)
-    except Exception:
-        logging.warning("Failed to send final set notice to %s", student.get("name"))
-
-
 def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[int] = None) -> bool:
     """Ensure class_dates extend at least ``horizon_weeks`` into the future."""
     if horizon_weeks is None:
@@ -854,11 +810,21 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
     class_dates = student.get("class_dates", [])
     original_len = len(class_dates)
 
+    renewal_date = None
+    renewal_str = student.get("renewal_date")
+    if renewal_str:
+        try:
+            renewal_date = date.fromisoformat(renewal_str)
+        except ValueError:
+            renewal_date = None
+
     parsed: List[datetime] = []
     for item in class_dates:
         try:
             dt = ensure_bangkok(item)
         except Exception:
+            continue
+        if renewal_date and dt.date() > renewal_date:
             continue
         parsed.append(dt)
     parsed.sort()
@@ -878,6 +844,8 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
                 dt = ensure_bangkok(dt_str)
                 if latest and dt <= latest:
                     continue
+                if renewal_date and dt.date() > renewal_date:
+                    continue
                 parsed.append(dt)
                 added = True
     parsed.sort()
@@ -889,8 +857,9 @@ def regenerate_future_class_dates(student: Dict[str, Any], *, now: Optional[date
     """Regenerate future ``class_dates`` based on ``schedule_pattern``.
 
     Past class dates are preserved. Future dates are generated from the
-    current ``schedule_pattern`` from ``now`` forward. ``class_dates`` remain
-    sorted and de-duplicated and cancelled dates are skipped.
+    current ``schedule_pattern`` from ``now`` up to the student's
+    ``renewal_date`` (if any).  ``class_dates`` remain sorted and
+    de-duplicated and cancelled dates are skipped.
     """
     if now is None:
         now = ensure_bangkok(datetime.now())
@@ -904,7 +873,12 @@ def regenerate_future_class_dates(student: Dict[str, Any], *, now: Optional[date
             continue
         if dt <= now:
             past.append(dt)
+    renewal_str = student.get("renewal_date")
+    renewal_date = date.fromisoformat(renewal_str) if renewal_str else None
     horizon_weeks = student.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
+    if renewal_date:
+        diff_weeks = max(0, (renewal_date - now.date()).days // 7 + 1)
+        horizon_weeks = max(horizon_weeks, diff_weeks)
     future: List[datetime] = []
     if entries:
         gen = parse_schedule(
@@ -917,6 +891,8 @@ def regenerate_future_class_dates(student: Dict[str, Any], *, now: Optional[date
             except Exception:
                 continue
             if dt <= now:
+                continue
+            if renewal_date and dt.date() > renewal_date:
                 continue
             if dt.isoformat() in cancelled:
                 continue
@@ -1039,6 +1015,11 @@ def reschedule_single_class(
         new_dt = new_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if new_dt <= now:
         raise ValueError("Cannot reschedule into the past")
+    renewal_str = student.get("renewal_date")
+    if renewal_str:
+        renewal_date = date.fromisoformat(renewal_str)
+        if new_dt.date() > renewal_date:
+            raise ValueError("Beyond renewal date")
     class_dates = [datetime.fromisoformat(x) for x in student.get("class_dates", [])]
     try:
         class_dates.remove(old_dt)
@@ -1232,6 +1213,17 @@ async def add_handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         except Exception:
             context.user_data["telegram_id"] = None
             context.user_data["needs_id"] = True
+    await update.message.reply_text("Enter the plan price (numerical value, e.g., 3500):")
+    return ADD_PRICE
+
+
+async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        price = float(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("Invalid price. Please enter a numeric value:")
+        return ADD_PRICE
+    context.user_data["plan_price"] = price
     await update.message.reply_text("Enter number of classes in the plan (e.g., 8):")
     return ADD_CLASSES
 
@@ -1307,7 +1299,19 @@ async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     duration = max(0.5, min(4.0, duration))
     duration = round(duration * 4) / 4
     context.user_data["class_duration_hours"] = duration
+    await update.message.reply_text(
+        "Enter the renewal date (YYYY-MM-DD). This is when the student is expected to renew payment:",
+    )
+    return ADD_RENEWAL
 
+
+async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    date_str = update.message.text.strip()
+    renewal = parse_renewal_date(date_str)
+    if renewal is None:
+        await update.message.reply_text("Invalid date format. Please use YYYY-MM-DD:")
+        return ADD_RENEWAL
+    context.user_data["renewal_date"] = renewal
     # Build student record
     students = load_students()
     telegram_id = context.user_data.get("telegram_id")
@@ -1330,6 +1334,8 @@ async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         "telegram_id": int(telegram_id) if telegram_id else None,
         "telegram_handle": handle,
         "classes_remaining": context.user_data.get("classes_remaining"),
+        "plan_price": context.user_data.get("plan_price"),
+        "renewal_date": context.user_data.get("renewal_date"),
         "class_dates": class_dates,
         "schedule_pattern": schedule_pattern,
         "cutoff_hours": context.user_data.get("cutoff_hours"),
@@ -1697,9 +1703,58 @@ async def award_free_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @admin_only
 async def renew_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Legacy command; use admin flow for renewals."""
+    """Renew a student's plan by adding classes and setting a new renewal date.
+
+    Usage: /renewstudent <student_key> <num_classes> <YYYY-MM-DD>
+    """
+    args = context.args
+    if len(args) != 3:
+        await update.message.reply_text(
+            "Usage: /renewstudent <student_key> <num_classes> <YYYY-MM-DD>"
+        )
+        return
+    student_key_input, classes_str, date_str = args
+    try:
+        num_classes = int(classes_str)
+        if num_classes <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Number of classes must be a positive integer.")
+        return
+    renewal = parse_renewal_date(date_str)
+    if renewal is None:
+        await update.message.reply_text("Invalid date format. Use YYYY-MM-DD.")
+        return
+    students = load_students()
+    student_key, student = resolve_student(students, student_key_input)
+    if not student:
+        await update.message.reply_text(f"Student '{student_key_input}' not found.")
+        return
+    if is_premium(student):
+        await update.message.reply_text(
+            f"Note: {student['name']} is Premium; award/renew not required."
+        )
+        return
+    student["classes_remaining"] = student.get("classes_remaining", 0) + num_classes
+    student["renewal_date"] = renewal
+    # Reset last balance warning upon renewal
+    student.pop("last_balance_warning", None)
+    ensure_future_class_dates(student)
+    save_students(students)
+    schedule_student_reminders(context.application, student_key, student)
+    logs = load_logs()
+    logs.append(
+        {
+            "student": student_key,
+            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
+            "status": "renewed",
+            "note": f"{num_classes} classes, new renewal {renewal}",
+        }
+    )
+    save_logs(logs)
     await update.message.reply_text(
-        "This command is deprecated; use the in-bot renew flow instead."
+        f"Renewed {student['name']}: added {num_classes} classes, renewal date set to {renewal}. "
+        f"Balance: {student['classes_remaining']}"
     )
 
 
@@ -1831,17 +1886,21 @@ def generate_dashboard_summary() -> str:
             if remaining <= 2:
                 low_balance.append(student["name"])
 
-            last_class = get_last_class(student)
-            if last_class:
-                last_date = last_class.date()
-                if last_date < today:
-                    overdue_renewals.append(
-                        f"{student['name']} ({last_date.isoformat()})"
-                    )
-                elif today <= last_date <= today + timedelta(days=7):
-                    upcoming_renewals.append(
-                        f"{student['name']} ({last_date.isoformat()})"
-                    )
+            renewal_str = student.get("renewal_date")
+            if renewal_str:
+                try:
+                    renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
+                except ValueError:
+                    renewal_date = None
+                if renewal_date:
+                    if renewal_date < today:
+                        overdue_renewals.append(
+                            f"{student['name']} ({renewal_date.isoformat()})"
+                        )
+                    elif today <= renewal_date <= today + timedelta(days=7):
+                        upcoming_renewals.append(
+                            f"{student['name']} ({renewal_date.isoformat()})"
+                        )
 
         if student.get("free_class_credit", 0) > 0:
             free_credits.append(
@@ -1867,14 +1926,14 @@ def generate_dashboard_summary() -> str:
         lines.append("- None")
     lines.append("")
 
-    lines.append("Set ends in next 7 days:")
+    lines.append("Upcoming payment renewals (next 7 days):")
     if upcoming_renewals:
         lines.extend(f"- {item}" for item in upcoming_renewals)
     else:
         lines.append("- None")
     lines.append("")
 
-    lines.append("Overdue set ends:")
+    lines.append("Overdue payment renewals:")
     if overdue_renewals:
         lines.extend(f"- {item}" for item in overdue_renewals)
     else:
@@ -1954,6 +2013,13 @@ async def dayview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if student.get("paused"):
             continue
         cancelled = set(student.get("cancelled_dates", []))
+        renewal_date = None
+        renewal_str = student.get("renewal_date")
+        if renewal_str:
+            try:
+                renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
+            except ValueError:
+                renewal_date = None
         for item in student.get("class_dates", []):
             try:
                 dt = parse_student_datetime(item, student).astimezone(BASE_TZ)
@@ -1962,6 +2028,8 @@ async def dayview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if dt.date() != target_date:
                 continue
             if item in cancelled:
+                continue
+            if renewal_date and dt.date() > renewal_date:
                 continue
             if target_date == now.date() and dt < now:
                 continue
@@ -3045,11 +3113,21 @@ async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         student_key, student, count=len(student.get("class_dates", []))
     )
 
+    renewal_str = student.get("renewal_date")
+    renewal_date: Optional[date] = None
+    if renewal_str:
+        try:
+            renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
+        except ValueError:
+            renewal_date = None
+
     lines = [f"Student: {student.get('name', student_key)}"]
     lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
     if schedule:
         lines.append("Schedule:")
         for dt in schedule:
+            if renewal_date and dt.date() > renewal_date:
+                continue
             lines.append(f"  - {dt.strftime('%A %d %b %Y at %H:%M')}")
     else:
         lines.append("Schedule: None")
@@ -3383,6 +3461,7 @@ def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMar
     upcoming = get_student_visible_classes(student, count=1)
     next_class_str = fmt_bkk(upcoming[0]) if upcoming else "No upcoming classes set"
     classes_remaining = student.get("classes_remaining", 0)
+    renewal = student.get("renewal_date", "N/A")
     lines = [f"Hello, {student['name']}!"]
     if is_premium(student):
         lines.append("🌟 Premium member")
@@ -3391,9 +3470,7 @@ def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMar
         lines.append("Classes remaining: ∞")
     else:
         lines.append(f"Classes remaining: {classes_remaining}")
-        last_class = get_last_class(student)
-        if last_class:
-            lines.append(f"Set ends: {last_class.date().isoformat()}")
+        lines.append(f"Plan renews on: {renewal}")
     if student.get("paused"):
         lines.append("Your plan is currently paused. Contact your teacher to resume.")
     buttons = [
@@ -3655,9 +3732,7 @@ def build_student_classes_text(
         lines.append("Classes remaining: ∞")
     else:
         lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
-        last_class = get_last_class(student)
-        if last_class:
-            lines.append(f"Set ends: {last_class.date().isoformat()}")
+        lines.append(f"Renewal date: {student.get('renewal_date', 'N/A')}")
     if student.get("paused"):
         lines.append("Your plan is currently paused.")
 
@@ -4335,11 +4410,13 @@ def main() -> None:
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_HANDLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_handle)],
+            ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_price)],
             ADD_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_classes)],
             ADD_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_schedule)],
             ADD_CUTOFF: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_cutoff)],
             ADD_WEEKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_weeks)],
             ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_duration)],
+            ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
         allow_reentry=True,
