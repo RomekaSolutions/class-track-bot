@@ -455,7 +455,7 @@ def load_students() -> Dict[str, Any]:
     """Load students from the JSON file and normalize legacy records."""
     if not os.path.exists(STUDENTS_FILE):
         return {}
-    with open(STUDENTS_FILE, "r", encoding="utf-8") as f:
+    with open(STUDENTS_FILE, "r", encoding="utf-8-sig") as f:
         try:
             data = json.load(f)
             if isinstance(data, dict):
