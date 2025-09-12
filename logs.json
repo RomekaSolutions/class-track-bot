@@ -1,0 +1,759 @@
+[
+  {
+    "date": "2025-08-10",
+    "note": "",
+    "status": "cancel_confirmed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "",
+    "status": "cancelled (early)",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "2025-09-11 13:00",
+    "status": "reschedule_requested",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "approved_by_admin",
+    "status": "rescheduled_to_2025-09-11 13:00",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "test",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "test",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "test",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "",
+    "status": "cancelled (early)",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "Present perfect",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-10",
+    "note": "",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-18",
+    "note": "good",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-18",
+    "note": "",
+    "status": "removed",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-18",
+    "note": "",
+    "status": "removed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-18",
+    "note": "",
+    "status": "missed (late cancel)",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-18",
+    "note": "",
+    "status": "removed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-18",
+    "note": "",
+    "status": "free_credit_awarded",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-18",
+    "note": "",
+    "status": "removed",
+    "student": "1430772716"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-18",
+    "note": "",
+    "status": "removed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-18",
+    "note": "Setup",
+    "status": "completed",
+    "student": "365509656"
+  },
+  {
+    "date": "2025-08-18",
+    "note": "Setup",
+    "status": "completed",
+    "student": "365509656"
+  },
+  {
+    "date": "2025-08-20",
+    "note": "connectors and sp practice",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-08-22",
+    "note": "Reporting headlines",
+    "status": "completed",
+    "student": "365509656"
+  },
+  {
+    "date": "2025-08-22",
+    "note": "completed: 2025-08-22T08:00:00+07:00",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-08-22",
+    "note": "completed: 2025-08-22T08:00:00+07:00",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-08-22",
+    "note": "completed: 2025-08-20T08:00:00+07:00",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-08-22",
+    "note": "",
+    "status": "cancelled (early)",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-23",
+    "note": "test",
+    "status": "removed",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-23",
+    "note": "TEST",
+    "status": "removed",
+    "student": "325871233"
+  },
+  {
+    "date": "2025-08-23",
+    "note": "completed: 2025-08-23T15:00:00+07:00",
+    "status": "completed",
+    "student": "325871233"
+  },
+  {
+    "date": "2025-08-23",
+    "note": "completed: 2025-08-23T14:00:00+07:00",
+    "status": "completed",
+    "student": "325871233"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-24",
+    "note": "test",
+    "status": "removed",
+    "student": "205171840"
+  },
+  {
+    "date": "2025-08-25T17:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-24T23:29:22.388190+07:00",
+    "note": "admin cancel",
+    "status": "cancelled",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-24T23:32:04.231812+07:00",
+    "note": "admin cancel",
+    "status": "cancelled",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-25T00:00:59.342167+07:00",
+    "note": "set to 2.0h",
+    "status": "length_changed",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-25T00:05:13.989950+07:00",
+    "note": "added Saturday 15:00",
+    "status": "pattern_updated",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-25T00:08:38.034183+07:00",
+    "note": "removed Saturday 15:00",
+    "status": "pattern_updated",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-25T00:14:21.780068+07:00",
+    "note": "2025-08-25T17:00+07:00 -> 2025-08-25T19:00:00+07:00",
+    "status": "rescheduled",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-25T19:00:00+07:00",
+    "note": "admin confirm cancel",
+    "status": "cancelled (early)",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-09-11T17:00:00+07:00",
+    "note": "admin confirm cancel",
+    "status": "cancelled (early)",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-25T07:49:13.407687+07:00",
+    "note": "removed Thursday 17:00",
+    "status": "pattern_updated",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-25T09:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-08-25T08:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-25T11:37:57.154492+07:00",
+    "note": "set to 1.0h",
+    "status": "length_changed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-25T12:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "365509656"
+  },
+  {
+    "date": "2025-09-15T17:00:00+07:00",
+    "note": "admin confirm cancel",
+    "status": "cancelled (early)",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-26T09:45:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "883527125"
+  },
+  {
+    "date": "2025-08-26T11:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "76032708"
+  },
+  {
+    "date": "2025-08-26T14:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "325871233"
+  },
+  {
+    "date": "2025-08-26T15:30:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "205171840"
+  },
+  {
+    "date": "2025-08-26T18:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-26T19:21:19.211557+07:00",
+    "note": "slot 0 Monday 17:00->Tuesday 11:00",
+    "status": "pattern_updated",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-08-26T19:22:29.461556+07:00",
+    "note": "slot 1 Monday 17:00->Thursday 18:00",
+    "status": "pattern_updated",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-08-27T09:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-08-27T08:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-08-27T10:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-08-28T09:45:00+07:00",
+    "note": "admin confirm cancel",
+    "status": "cancelled (early)",
+    "student": "883527125"
+  },
+  {
+    "date": "2025-08-27T18:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-08-28T11:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "76032708"
+  },
+  {
+    "date": "2025-08-25T17:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-08-28T14:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "325871233"
+  },
+  {
+    "date": "2025-08-29T11:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "365509656"
+  },
+  {
+    "date": "2025-08-29T09:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-08-29T08:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-08-29T14:30:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "205171840"
+  },
+  {
+    "date": "2025-08-30T15:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "325871233"
+  },
+  {
+    "date": "2025-08-30T14:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "325871233"
+  },
+  {
+    "date": "2025-09-09T11:00:00+07:00",
+    "note": "admin confirm cancel",
+    "status": "cancelled (early)",
+    "student": "1566976731"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-01",
+    "note": "Taking a break",
+    "status": "removed",
+    "student": "1430772716"
+  },
+  {
+    "date": "2025-09-01T01:28:41.013056+07:00",
+    "note": "admin award free credit",
+    "status": "free_credit_awarded",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-09-01T13:00:00+07:00",
+    "note": "admin confirm cancel (premium)",
+    "status": "cancelled (premium)",
+    "student": "742242"
+  },
+  {
+    "date": "2025-09-01T02:46:04.370077+07:00",
+    "note": "admin award free credit",
+    "status": "free_credit_awarded",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-09-01T02:46:53.618589+07:00",
+    "note": "",
+    "status": "cancelled",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-09-02T11:00:00+07:00",
+    "note": "admin confirm cancel",
+    "status": "cancelled (early)",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-09-01T13:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "742242"
+  },
+  {
+    "date": "2025-09-01T10:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-09-01T12:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "365509656"
+  },
+  {
+    "date": "2025-09-01T14:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "742242"
+  },
+  {
+    "date": "2025-08-25T14:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "742242"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-01T22:28:54.896783+07:00",
+    "note": "slot 0 Tuesday 15:30->Thursday 15:00",
+    "status": "pattern_updated",
+    "student": "205171840"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-01T22:29:26.812958+07:00",
+    "note": "slot 1 Friday 14:30->Friday 16:00",
+    "status": "pattern_updated",
+    "student": "205171840"
+  },
+  {
+    "date": "2025-09-02T11:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "1566976731"
+  },
+  {
+    "date": "2025-09-02T09:00:03.903093+07:00",
+    "note": "admin award free credit",
+    "status": "free_credit_awarded",
+    "student": "883527125"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-02T09:18:45.293502+07:00",
+    "note": "slot 0 Tuesday 11:00->Friday 12:30",
+    "status": "pattern_updated",
+    "student": "76032708"
+  },
+  {
+    "date": "2025-09-02T18:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-09-03T10:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-09-03T18:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-09-04T11:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "76032708"
+  },
+  {
+    "date": "2025-09-04T09:45:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "883527125"
+  },
+  {
+    "date": "2025-09-04T14:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "325871233"
+  },
+  {
+    "date": "2025-09-04T15:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "205171840"
+  },
+  {
+    "date": "2025-09-02T14:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "325871233"
+  },
+  {
+    "date": "2025-08-28T16:45:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "408026385"
+  },
+  {
+    "date": "2025-09-04T18:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-09-05T11:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "365509656"
+  },
+  {
+    "date": "2025-09-05T16:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "205171840"
+  },
+  {
+    "date": "2025-09-06",
+    "note": "4 classes, new renewal 2025-10-02",
+    "status": "renewed",
+    "student": "408026385"
+  },
+  {
+    "new_value": true,
+    "student": "1566976731",
+    "ts": "2025-09-07T15:43:54.890610",
+    "type": "pause_toggled"
+  },
+  {
+    "new_value": false,
+    "student": "1566976731",
+    "ts": "2025-09-07T15:43:59.486123",
+    "type": "pause_toggled"
+  },
+  {
+    "date": "2025-09-08T10:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-09-08T12:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "365509656"
+  },
+  {
+    "date": "2025-09-08T08:45:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "868930626"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-08",
+    "note": "",
+    "status": "removed",
+    "student": "868930626"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-09",
+    "note": "",
+    "status": "removed",
+    "student": "76032708"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-09",
+    "note": "",
+    "status": "removed",
+    "student": "325871233"
+  },
+  {
+    "date": "2025-09-09T18:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-09-08T18:00:00+07:00",
+    "note": "",
+    "status": "completed",
+    "student": "446785918"
+  },
+  {
+    "date": "2025-09-09T11:00:00+07:00",
+    "status": "completed",
+    "student": "1566976731",
+    "ts": "2025-09-09T16:36:59.123397"
+  },
+  {
+    "date": "2025-08-25T10:00:00+07:00",
+    "status": "completed",
+    "student": "446785918",
+    "ts": "2025-09-09T16:43:36.432527"
+  },
+  {
+    "date": "2025-08-25T17:00:00+07:00",
+    "status": "completed",
+    "student": "446785918",
+    "ts": "2025-09-09T16:43:50.782979"
+  },
+  {
+    "date": "2025-08-25T18:00:00+07:00",
+    "status": "completed",
+    "student": "446785918",
+    "ts": "2025-09-09T16:44:02.059053"
+  },
+  {
+    "date": "2025-08-28T18:00:00+07:00",
+    "status": "completed",
+    "student": "446785918",
+    "ts": "2025-09-09T16:44:13.742735"
+  },
+  {
+    "date": "2025-09-01T18:00:00+07:00",
+    "status": "completed",
+    "student": "446785918",
+    "ts": "2025-09-09T16:44:25.696695"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-10",
+    "note": "",
+    "status": "removed",
+    "student": "205171840"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-10T02:27:04.754786+07:00",
+    "note": "added Monday 13:00, Wednesday 13:00",
+    "status": "pattern_updated",
+    "student": "742242"
+  },
+  {
+    "date": "2025-09-10T10:00:00+07:00",
+    "status": "completed",
+    "student": "446785918",
+    "ts": "2025-09-10T03:08:02.756649"
+  },
+  {
+    "date": "2025-09-10T11:15:00+07:00",
+    "status": "completed",
+    "student": "868930626",
+    "ts": "2025-09-10T05:18:40.220603"
+  },
+  {
+    "date": "2025-09-10T18:00:00+07:00",
+    "status": "completed",
+    "student": "446785918",
+    "ts": "2025-09-10T12:02:57.209540"
+  },
+  {
+    "date": "2025-09-11T18:00:00+07:00",
+    "status": "completed",
+    "student": "446785918",
+    "ts": "2025-09-11T11:58:17.899866"
+  }
+]

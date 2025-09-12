@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -61,13 +62,18 @@ def load_students() -> Dict[str, Any]:
         cleaned[new_key] = norm_student
         if new_key != str(key):
             changed = True
-    if changed:
+    if changed and cleaned:
+        # Only persist migrations if there is non-empty data
         save_students(cleaned)
     return cleaned
 
 
 def save_students(data: Dict[str, Any]) -> None:
     """Persist ``data`` to ``STUDENTS_FILE`` ensuring numeric keys."""
+
+    if not data:
+        logging.warning("Refusing to overwrite students.json with empty data")
+        return
 
     cleaned: Dict[str, Any] = {}
     for key, student in list(data.items()):
@@ -76,8 +82,30 @@ def save_students(data: Dict[str, Any]) -> None:
             continue
         new_key, norm_student = result
         cleaned[new_key] = norm_student
-    with open(STUDENTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(cleaned, f, indent=2, sort_keys=True)
+    if not cleaned:
+        logging.warning("Refusing to overwrite students.json with empty data")
+        return
+    tmp_path = f"{STUDENTS_FILE}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(cleaned, f, indent=2, sort_keys=True)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                # fsync may not be available on some platforms; ignore if so
+                pass
+        os.replace(tmp_path, STUDENTS_FILE)
+    except Exception as e:
+        logging.error(
+            "Failed to save students.json atomically; original file left unchanged: %s",
+            e,
+        )
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def get_student_by_id(student_id: str, safe: bool = True) -> Optional[Dict[str, Any]]:
@@ -381,12 +409,15 @@ def cancel_single_class(student_id: str, iso_dt: str, cutoff_hours: int) -> bool
     stu = data.get(str(student_id))
     if not stu:
         return False
-    now = datetime.utcnow()
+    # Use timezone-aware UTC so comparisons with aware class datetimes are valid
+    now = datetime.now(timezone.utc)
     class_time = datetime.fromisoformat(iso_dt)
+    # Normalize naive datetimes to UTC for safe comparisons in tests
+    if class_time.tzinfo is None:
+        class_time = class_time.replace(tzinfo=timezone.utc)
     is_late = now > class_time - timedelta(hours=cutoff_hours)
+    # Keep class_dates intact; track cancellations separately
     dates = stu.get("class_dates", [])
-    if iso_dt in dates:
-        dates.remove(iso_dt)
     stu["class_dates"] = dates
     cancelled = stu.get("cancelled_dates", [])
     cancelled.append(iso_dt)

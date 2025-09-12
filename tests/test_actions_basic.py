@@ -49,7 +49,8 @@ def test_cancel_single_class_early(tmp_path, monkeypatch):
     data_store.cancel_single_class("1", d1, cutoff_hours=24)
     data = json.loads(students_file.read_text())
     stu = data["1"]
-    assert d1 not in stu["class_dates"]
+    assert d1 in stu["class_dates"]
+    assert d1 in stu["cancelled_dates"]
     assert stu["classes_remaining"] == 3
     logs = json.loads(logs_file.read_text())
     assert logs[-1]["type"] == "class_cancelled"
@@ -63,7 +64,8 @@ def test_cancel_single_class_late(tmp_path, monkeypatch):
     data_store.cancel_single_class("1", d1, cutoff_hours=2)
     data = json.loads(students_file.read_text())
     stu = data["1"]
-    assert d1 not in stu["class_dates"]
+    assert d1 in stu["class_dates"]
+    assert d1 in stu["cancelled_dates"]
     assert stu["classes_remaining"] == 2
     logs = json.loads(logs_file.read_text())
     assert logs[-1]["type"] == "class_cancelled"

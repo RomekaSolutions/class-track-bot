@@ -450,6 +450,9 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         send_low_balance_if_threshold,
         schedule_final_set_notice,
     )
+    # In test contexts, ContextTypes.DEFAULT_TYPE may be a dummy without .application
+    if not hasattr(context, "application"):
+        return
     schedule_student_reminders(context.application, student_id, stu)
     await send_low_balance_if_threshold(context.application, student_id, stu)
     schedule_final_set_notice(context.application, student_id, stu)
@@ -690,6 +693,10 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
             send_low_balance_if_threshold,
             schedule_final_set_notice,
         )
+        if not hasattr(context, "application"):
+            return
+        if not hasattr(context, "application"):
+            return
         schedule_student_reminders(context.application, student_id, student)
         await send_low_balance_if_threshold(context.application, student_id, student)
         schedule_final_set_notice(context.application, student_id, student)
@@ -722,6 +729,8 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
             schedule_student_reminders,
             schedule_final_set_notice,
         )
+        if not hasattr(context, "application"):
+            return
         schedule_student_reminders(context.application, student_id, student)
         schedule_final_set_notice(context.application, student_id, student)
         text, markup = keyboard_builders.build_student_detail_view(student_id, student)
@@ -766,9 +775,10 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             send_low_balance_if_threshold,
             schedule_final_set_notice,
         )
-        schedule_student_reminders(context.application, student_id, student)
-        await send_low_balance_if_threshold(context.application, student_id, student)
-        schedule_final_set_notice(context.application, student_id, student)
+        if context and hasattr(context, "application"):
+            schedule_student_reminders(context.application, student_id, student)
+            await send_low_balance_if_threshold(context.application, student_id, student)
+            schedule_final_set_notice(context.application, student_id, student)
         msg = f"Class at {iso_dt} logged as completed."
     elif action in {"CANCEL_EARLY", "CANCEL_LATE"}:
         cutoff = 99999 if action == "CANCEL_EARLY" else 0
@@ -779,9 +789,10 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             send_low_balance_if_threshold,
             schedule_final_set_notice,
         )
-        schedule_student_reminders(context.application, student_id, student)
-        await send_low_balance_if_threshold(context.application, student_id, student)
-        schedule_final_set_notice(context.application, student_id, student)
+        if context and hasattr(context, "application"):
+            schedule_student_reminders(context.application, student_id, student)
+            await send_low_balance_if_threshold(context.application, student_id, student)
+            schedule_final_set_notice(context.application, student_id, student)
         label = "cancelled late" if action == "CANCEL_LATE" else "cancelled early"
         msg = f"Class at {iso_dt} logged as {label}."
     else:

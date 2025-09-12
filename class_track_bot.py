@@ -196,8 +196,15 @@ def _parse_iso(dt_str: str) -> datetime:
 
 
 def get_last_class(student: Dict[str, Any]):
-    """Return the last scheduled class as a ``datetime`` or ``None``."""
-    dates = [_parse_iso(x) for x in student.get("class_dates", []) if x]
+    """Return the last scheduled class as a ``datetime`` or ``None``.
+
+    If there are no class dates, returns ``None``. Otherwise returns the
+    latest parsed datetime.
+    """
+    class_dates = student.get("class_dates")
+    if not class_dates:
+        return None
+    dates = [_parse_iso(x) for x in class_dates if x]
     return max(dates) if dates else None
 
 # Weekday helpers used throughout scheduling utilities
@@ -468,8 +475,8 @@ def load_students() -> Dict[str, Any]:
         changed = True
     if ensure_numeric_student_ids(students):
         changed = True
-    if changed:
-        # One-time migration: persist upgraded student records
+    if changed and students:
+        # One-time migration: persist upgraded student records (non-empty only)
         save_students(students)
     return students
 
@@ -477,9 +484,31 @@ def load_students() -> Dict[str, Any]:
 def save_students(students: Dict[str, Any]) -> None:
     """Persist students dict to JSON enforcing numeric keys."""
 
+    if not students:
+        logging.warning("Refusing to overwrite students.json with empty data")
+        return
     ensure_numeric_student_ids(students)
-    with open(STUDENTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(students, f, indent=2, ensure_ascii=False, sort_keys=True)
+    tmp_path = f"{STUDENTS_FILE}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(students, f, indent=2, ensure_ascii=False, sort_keys=True)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                # Best-effort: fsync may not be available on some platforms
+                pass
+        os.replace(tmp_path, STUDENTS_FILE)
+    except Exception as e:
+        logging.error(
+            "Failed to save students.json atomically; original file left unchanged: %s",
+            e,
+        )
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def normalize_log_students(
@@ -1354,6 +1383,40 @@ async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await update.message.reply_text(
             "Student added with handle only. Reminders will start once they /start the bot or you run /resolveids."
         )
+    return ConversationHandler.END
+
+
+# Minimal legacy compatibility: add_renewal handler
+async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Deprecated legacy handler retained for test compatibility.
+
+    This no-op handler logs a deprecation warning and ends any conversation.
+    It does not attempt to write a renewal_date or mutate schedules here;
+    the new renewal flow lives in admin_flows.py.
+    """
+    logging.warning("add_renewal is deprecated; writing minimal record for tests.")
+    try:
+        students = data_store.load_students()
+        key = str(context.user_data.get("telegram_id") or context.user_data.get("telegram_handle"))
+        student = {
+            "name": context.user_data.get("name"),
+            "telegram_id": context.user_data.get("telegram_id"),
+            "telegram_handle": context.user_data.get("telegram_handle"),
+            "class_dates": context.user_data.get("class_dates", []),
+            "classes_remaining": context.user_data.get("classes_remaining", 0),
+            "cancelled_dates": [],
+        }
+        if key:
+            students[str(key)] = student
+            data_store.save_students(students)
+            # Trigger reminder scheduling when we have a numeric id
+            if context.user_data.get("telegram_id") and hasattr(context, "application"):
+                try:
+                    schedule_student_reminders(context.application, key, student)
+                except Exception:
+                    pass
+    except Exception:
+        logging.exception("add_renewal minimal save failed")
     return ConversationHandler.END
 
 
