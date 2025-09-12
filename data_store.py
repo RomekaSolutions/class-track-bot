@@ -46,7 +46,7 @@ def load_students() -> Dict[str, Any]:
     if not os.path.exists(STUDENTS_FILE):
         return {}
     try:
-        with open(STUDENTS_FILE, "r", encoding="utf-8") as f:
+        with open(STUDENTS_FILE, "r", encoding="utf-8-sig") as f:
             raw = json.load(f)
     except Exception:
         return {}
