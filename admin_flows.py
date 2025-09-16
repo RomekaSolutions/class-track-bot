@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes
 
 import data_store
 import keyboard_builders
+from data_store import load_logs, load_students, save_logs, save_students
 from helpers import (
     fmt_class_label,
     generate_from_pattern,
@@ -16,6 +17,11 @@ from helpers import (
     Slot,
 )
 
+
+try:
+    from class_track_bot import BASE_TZ  # type: ignore
+except Exception:  # pragma: no cover - fallback for circular import during init
+    BASE_TZ = timezone(timedelta(hours=7))
 
 STUDENT_NOT_FOUND_MSG = (
     "❌ This student was not found — they may have been removed or renamed."
@@ -527,11 +533,42 @@ async def initiate_remove_student(query, context, student_id: str, student: Dict
 
 
 async def initiate_adhoc_class(query, context, student_id: str, student: Dict[str, Any]):
-    await safe_edit_or_send(
-        query,
-        f"Coming soon: adhoc class for {student.get('name', student_id)}",
-        reply_markup=_back_markup(student_id),
-    )
+    """Use one class credit for an adhoc/extra hour session."""
+
+    students = load_students()
+    student = students.get(student_id)
+    if not student:
+        return await safe_edit_or_send(query, "Student not found.")
+
+    # Check if student has classes remaining
+    classes_remaining = student.get("classes_remaining", 0)
+    if classes_remaining <= 0:
+        return await safe_edit_or_send(
+            query,
+            f"❌ {student.get('name', student_id)} has no classes remaining.",
+            reply_markup=_back_markup(student_id),
+        )
+
+    # Subtract 1 from classes_remaining (that's all we do)
+    student["classes_remaining"] = classes_remaining - 1
+
+    save_students(students)
+
+    # Log the action
+    logs = load_logs()
+    logs.append({
+        "student": student_id,
+        "date": datetime.now(BASE_TZ).isoformat(),
+        "status": "adhoc_class_used",
+        "note": "admin used class credit for adhoc/extra hour",
+        "admin": query.from_user.id if query.from_user else None,
+    })
+    save_logs(logs)
+
+    text = f"✅ Used 1 class credit for {student.get('name', student_id)}\n"
+    text += f"Remaining classes: {student['classes_remaining']}"
+
+    await safe_edit_or_send(query, text, reply_markup=_back_markup(student_id))
 
 
 actions_map: Dict[str, Callable] = {
