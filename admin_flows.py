@@ -595,13 +595,14 @@ async def handle_student_action(update: Update, context: ContextTypes.DEFAULT_TY
         return
     await query.answer()
     logging.debug("handle_student_action data=%s", query.data)
-    match = re.match(
-        r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):([^:]+)$",
-        query.data,
-    )
-    if not match:
+    data = query.data or ""
+    if not data.startswith("stu:"):
         return
-    action, student_id = match.group(1), match.group(2)
+    try:
+        _, action, student_id = data.split(":", 2)
+    except ValueError:
+        logging.warning("Malformed student action callback: %s", data)
+        return
     student = data_store.get_student_by_id(student_id)
     if not student:
         await safe_edit_or_send(query, STUDENT_NOT_FOUND_MSG)

@@ -2208,10 +2208,15 @@ async def admin_pick_student_callback(update, context):
     q = update.callback_query
     if not is_admin(q.from_user.id):
         return await q.answer("Admins only.", show_alert=True)
-    student_id = q.data.split(":")[-1]
+    data = q.data or ""
+    try:
+        _, _, student_key = data.split(":", 2)
+    except ValueError:
+        await q.answer("Student not found.", show_alert=True)
+        return await admin_students_page_callback(update, context)
     students = load_students()
-    student = students.get(student_id)
-    if not student:
+    student_id, student = resolve_student(students, student_key)
+    if not student or not student_id:
         await q.answer("Student not found.", show_alert=True)
         return await admin_students_page_callback(update, context)
     context.user_data["admin_selected_student_id"] = student_id
@@ -3052,6 +3057,12 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
     for key in keys_to_delete:
         students.pop(key, None)
     save_students(students)
+    if not students:
+        try:
+            with open(STUDENTS_FILE, "w", encoding="utf-8") as f:
+                json.dump({}, f, indent=2, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            logging.warning("Failed to persist empty students.json during purge")
 
     for job in context.application.job_queue.jobs():
         name = job.name or ""
@@ -3059,10 +3070,14 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
             job.schedule_removal()
 
     logs = load_logs()
+    try:
+        removal_date = datetime.now(student_timezone(student))
+    except TypeError:
+        removal_date = ensure_bangkok(datetime.utcnow())
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
+            "date": removal_date.strftime("%Y-%m-%d"),
             "status": "removed",
             "note": reason,
             "admin": update.effective_user.id,
@@ -4468,7 +4483,7 @@ def main() -> None:
     )
     application.add_handler(
         CallbackQueryHandler(
-            admin_pick_student_callback, pattern=r"^admin:pick:(\d+)$"
+            admin_pick_student_callback, pattern=r"^admin:pick:[^:]+$"
         )
     )
     application.add_handler(
