@@ -40,7 +40,7 @@ def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple
     """Return a detailed summary for ``student`` and the admin submenu."""
 
     name = student.get("name", student_id)
-    if student.get("needs_id"):
+    if student.get("needs_id") and student.get("telegram_mode", True):
         name += " (needs ID)"
     remaining = student.get("classes_remaining", 0)
 
@@ -62,4 +62,14 @@ def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple
     lines.append(f"Paused: {'Yes' if paused else 'No'}")
 
     text = "\n".join(lines)
-    return text, build_student_submenu(student_id)
+    submenu = build_student_submenu(student_id)
+    keyboard = [row[:] for row in submenu.inline_keyboard]
+    if student.get("telegram_mode") is False:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📱 Connect to Telegram", callback_data=f"stu:CONNECT:{student_id}"
+                )
+            ]
+        )
+    return text, InlineKeyboardMarkup(keyboard)
