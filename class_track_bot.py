@@ -449,7 +449,8 @@ def migrate_student_dates(students: Dict[str, Any]) -> bool:
     ADD_CUTOFF,
     ADD_WEEKS,
     ADD_DURATION,
-) = range(7)
+    ADD_TELEGRAM_CHOICE,
+) = range(8)
 
 def load_students() -> Dict[str, Any]:
     """Load students from the JSON file and normalize legacy records."""
@@ -763,9 +764,15 @@ async def send_class_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     students = load_students()
     student = students.get(student_key)
-    if not student or student.get("paused"):
+    if (
+        not student
+        or student.get("paused")
+        or not student.get("telegram_mode", True)
+    ):
         return
-    chat_id = student.get("telegram_id")
+    chat_id = (
+        student.get("telegram_id") if student.get("telegram_mode", True) else None
+    )
     if not chat_id:
         return
     try:
@@ -809,6 +816,8 @@ def schedule_student_reminders(
     reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
 ) -> None:
     """Schedule reminder jobs for all future classes of a student."""
+    if not student.get("telegram_mode", True):
+        return
     if not student.get("telegram_id"):
         return
     prefix = f"class_reminder:{student_key}:"
@@ -846,6 +855,8 @@ async def send_low_balance_if_threshold(app: Application, student_key: str, stud
 
 def schedule_final_set_notice(app: Application, student_key: str, student: Dict[str, Any], offset: timedelta = timedelta(hours=1)) -> None:
     """Schedule a notice before the final class in the current set."""
+    if not student.get("telegram_mode", True):
+        return
     last_class = get_last_class(student)
     if not last_class:
         return
@@ -860,7 +871,7 @@ def schedule_final_set_notice(app: Application, student_key: str, student: Dict[
 async def send_final_set_notice(context: ContextTypes.DEFAULT_TYPE):
     student_key = context.job.data.get("student_key")
     student = data_store.get_student_by_id(student_key)
-    if not student:
+    if not student or not student.get("telegram_mode", True):
         return
     chat_id = student.get("telegram_id")
     if not chat_id:
@@ -1237,12 +1248,113 @@ async def add_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["name"] = update.message.text.strip()
-    await update.message.reply_text("Enter the student's Telegram @handle or numeric ID:")
-    return ADD_HANDLE
+    name = (update.message.text or "").strip()
+    if not name:
+        await update.message.reply_text(
+            "Name can't be empty. Please enter the student's name:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_NAME
+    context.user_data["name"] = name
+    context.user_data.pop("telegram_mode", None)
+    context.user_data.pop("student_key", None)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📱 Has Telegram", callback_data="student_has_telegram"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📵 No Telegram Yet", callback_data="student_no_telegram"
+                )
+            ],
+            [
+                InlineKeyboardButton("❌ Cancel", callback_data="student_cancel")
+            ],
+        ]
+    )
+    await update.message.reply_text(
+        "Does this student use Telegram?",
+        reply_markup=keyboard,
+    )
+    return ADD_TELEGRAM_CHOICE
+
+
+async def add_telegram_choice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    if not query:
+        return ADD_TELEGRAM_CHOICE
+    await query.answer()
+    choice = query.data or ""
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if choice == "student_has_telegram":
+        context.user_data["telegram_mode"] = True
+        context.user_data.pop("student_key", None)
+        context.user_data.setdefault("telegram_id", None)
+        context.user_data.setdefault("telegram_handle", None)
+        await query.message.reply_text(
+            "Enter the student's Telegram @handle or numeric ID:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_HANDLE
+    if choice == "student_no_telegram":
+        context.user_data["telegram_mode"] = False
+        context.user_data["telegram_id"] = None
+        context.user_data["telegram_handle"] = None
+        context.user_data.pop("needs_id", None)
+        name = context.user_data.get("name", "")
+        student_key = name.lower().replace(" ", "_")
+        context.user_data["student_key"] = student_key
+        await query.message.reply_text(
+            "Enter number of classes in the plan (e.g., 8):",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_CLASSES
+    if choice == "student_cancel":
+        context.user_data.clear()
+        await query.message.reply_text(
+            "Operation cancelled.", reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    await query.message.reply_text(
+        "Please choose one of the provided options.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "📱 Has Telegram", callback_data="student_has_telegram"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "📵 No Telegram Yet", callback_data="student_no_telegram"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ Cancel", callback_data="student_cancel"
+                    )
+                ],
+            ]
+        ),
+    )
+    return ADD_TELEGRAM_CHOICE
 
 
 async def add_handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if context.user_data.get("telegram_mode") is False:
+        await update.message.reply_text(
+            "Please choose whether the student has Telegram using the buttons provided.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_TELEGRAM_CHOICE
     handle = update.message.text.strip()
     if handle.startswith("@"):  # strip leading @
         handle = handle[1:]
@@ -1339,9 +1451,21 @@ async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     # Build student record
     students = load_students()
-    telegram_id = context.user_data.get("telegram_id")
-    handle = normalize_handle(context.user_data.get("telegram_handle"))
-    key = str(int(telegram_id)) if telegram_id else handle
+    telegram_mode = context.user_data.get("telegram_mode")
+    if telegram_mode is None:
+        telegram_mode = True
+    if telegram_mode:
+        telegram_id = context.user_data.get("telegram_id")
+        handle = normalize_handle(context.user_data.get("telegram_handle"))
+        key = str(int(telegram_id)) if telegram_id else handle
+    else:
+        telegram_id = None
+        handle = None
+        key = context.user_data.get("student_key")
+        if not key:
+            name = context.user_data.get("name", "")
+            key = name.lower().replace(" ", "_")
+            context.user_data["student_key"] = key
     if key in students:
         await update.message.reply_text("A student with this identifier already exists. Aborting.")
         return ConversationHandler.END
@@ -1368,20 +1492,25 @@ async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         "free_class_credit": 0,
         "reschedule_credit": 0,
         "notes": [],
+        "telegram_mode": bool(telegram_mode),
     }
-    if not telegram_id:
+    if telegram_mode and not telegram_id:
         student["needs_id"] = True
     ensure_future_class_dates(student)
     students[key] = student
     save_students(students)
-    if telegram_id:
+    if telegram_mode and telegram_id:
         schedule_student_reminders(context.application, key, student)
         await update.message.reply_text(
             f"Added student {context.user_data.get('name')} successfully!"
         )
-    else:
+    elif telegram_mode:
         await update.message.reply_text(
             "Student added with handle only. Reminders will start once they /start the bot or you run /resolveids."
+        )
+    else:
+        await update.message.reply_text(
+            "Student added without Telegram. You can connect them later from their profile."
         )
     return ConversationHandler.END
 
@@ -1397,20 +1526,36 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     logging.warning("add_renewal is deprecated; writing minimal record for tests.")
     try:
         students = data_store.load_students()
-        key = str(context.user_data.get("telegram_id") or context.user_data.get("telegram_handle"))
+        telegram_mode = context.user_data.get("telegram_mode")
+        if telegram_mode is None:
+            telegram_mode = True
+        if telegram_mode:
+            key = str(
+                context.user_data.get("telegram_id")
+                or context.user_data.get("telegram_handle")
+            )
+        else:
+            name = context.user_data.get("name", "")
+            key = context.user_data.get("student_key") or name.lower().replace(" ", "_")
+            context.user_data["student_key"] = key
         student = {
             "name": context.user_data.get("name"),
-            "telegram_id": context.user_data.get("telegram_id"),
-            "telegram_handle": context.user_data.get("telegram_handle"),
+            "telegram_id": context.user_data.get("telegram_id") if telegram_mode else None,
+            "telegram_handle": context.user_data.get("telegram_handle") if telegram_mode else None,
             "class_dates": context.user_data.get("class_dates", []),
             "classes_remaining": context.user_data.get("classes_remaining", 0),
             "cancelled_dates": [],
+            "telegram_mode": bool(telegram_mode),
         }
         if key:
             students[str(key)] = student
             data_store.save_students(students)
             # Trigger reminder scheduling when we have a numeric id
-            if context.user_data.get("telegram_id") and hasattr(context, "application"):
+            if (
+                telegram_mode
+                and context.user_data.get("telegram_id")
+                and hasattr(context, "application")
+            ):
                 try:
                     schedule_student_reminders(context.application, key, student)
                 except Exception:
@@ -2226,6 +2371,85 @@ async def admin_pick_student_callback(update, context):
     await safe_edit_or_send(q, text, reply_markup=kb)
 
 
+async def _send_admin_student_detail(
+    context: ContextTypes.DEFAULT_TYPE,
+    connect_state: Dict[str, Any],
+    student_key: str,
+    student: Dict[str, Any],
+    fallback_message=None,
+) -> None:
+    """Update the admin detail message or send a new one as a fallback."""
+
+    text, markup = build_student_detail_view(student_key, student)
+    bot = getattr(context, "bot", None) or getattr(
+        getattr(context, "application", None), "bot", None
+    )
+    chat_id = connect_state.get("prompt_chat_id")
+    message_id = connect_state.get("prompt_message_id")
+    if (
+        bot
+        and hasattr(bot, "edit_message_text")
+        and chat_id is not None
+        and message_id is not None
+    ):
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=markup,
+            )
+            return
+        except Exception:
+            logging.debug("Failed to edit admin detail message; sending fallback.")
+    if fallback_message is not None and hasattr(fallback_message, "reply_text"):
+        await fallback_message.reply_text(text, reply_markup=markup)
+
+
+async def connect_student_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Prompt the admin to supply Telegram details for an offline student."""
+
+    query = update.callback_query
+    if not query:
+        return
+    user_id = getattr(getattr(query, "from_user", None), "id", None)
+    if not is_admin(user_id):
+        await query.answer("Admins only.", show_alert=True)
+        return
+    await query.answer()
+    data = query.data or ""
+    parts = data.split(":", 2)
+    if len(parts) < 3:
+        await safe_edit_or_send(query, "Student not found.")
+        return
+    raw_student_id = parts[2]
+    students = load_students()
+    student_key, student = resolve_student(students, raw_student_id)
+    if not student or not student_key:
+        await safe_edit_or_send(query, "Student not found.")
+        return
+    if student.get("telegram_mode", True):
+        await query.answer("Already connected.", show_alert=False)
+        text, markup = build_student_detail_view(student_key, student)
+        await safe_edit_or_send(query, text, reply_markup=markup)
+        return
+    message = getattr(query, "message", None)
+    chat = getattr(message, "chat", None)
+    context.user_data["connect_student"] = {
+        "student_key": student_key,
+        "prompt_chat_id": getattr(chat, "id", None),
+        "prompt_message_id": getattr(message, "message_id", None),
+    }
+    prompt = (
+        f"Please send the student's Telegram @handle or numeric ID for "
+        f"{student.get('name', student_key)}.\n"
+        "Type 'cancel' to abort."
+    )
+    await safe_edit_or_send(query, prompt)
+
+
 async def admin_view_for_student(student_id: str, query, context):
     students = load_students()
     student = students.get(student_id)
@@ -2450,13 +2674,15 @@ async def list_students_command(update: Update, context: ContextTypes.DEFAULT_TY
     lines = ["Active students:"]
     for s in sorted(active, key=lambda x: x.get("name", "").lower()):
         handle = s.get("telegram_handle")
-        if handle:
+        if not s.get("telegram_mode", True):
+            ident = "offline"
+        elif handle:
             ident = f"@{handle}"
         elif s.get("telegram_id"):
             ident = f"id {s['telegram_id']}"
         else:
             ident = "no handle"
-        if s.get("needs_id"):
+        if s.get("needs_id") and s.get("telegram_mode", True):
             ident += " (needs ID)"
         lines.append(f"- {s['name']} ({ident})")
 
@@ -3487,6 +3713,8 @@ async def refresh_student_menu(
     student_key: str, student: Dict[str, Any], bot
 ) -> None:
     """Send an updated /start summary to the student's chat."""
+    if not student.get("telegram_mode", True):
+        return
     chat_id = student.get("telegram_id")
     if not chat_id or bot is None:
         return
@@ -3501,6 +3729,8 @@ async def refresh_student_my_classes(
     student_key: str, student: Dict[str, Any], bot
 ) -> None:
     """Send the current "My Classes" view to the student's chat."""
+    if not student.get("telegram_mode", True):
+        return
     chat_id = student.get("telegram_id")
     if not chat_id or bot is None:
         return
@@ -3996,6 +4226,139 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
             )
 
 
+async def process_connect_student_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    students: Dict[str, Any],
+) -> bool:
+    """Handle admin responses when linking an offline student to Telegram."""
+
+    connect_state = context.user_data.get("connect_student")
+    if not connect_state:
+        return False
+    message = update.message
+    if not message or not hasattr(message, "text"):
+        return True
+    raw_text = (message.text or "").strip()
+    if not raw_text:
+        await message.reply_text("Please enter a Telegram handle or numeric ID.")
+        return True
+    if raw_text.lower() in {"cancel", "stop"}:
+        context.user_data.pop("connect_student", None)
+        original_key = str(connect_state.get("student_key", ""))
+        student_key, student = resolve_student(students, original_key)
+        if student:
+            await _send_admin_student_detail(context, connect_state, student_key, student, message)
+        await message.reply_text("Connect to Telegram cancelled.")
+        return True
+
+    original_key = str(connect_state.get("student_key", ""))
+    student_key, student = resolve_student(students, original_key)
+    if not student or not student_key:
+        context.user_data.pop("connect_student", None)
+        await message.reply_text("Student not found.")
+        return True
+    if student.get("telegram_mode", True):
+        context.user_data.pop("connect_student", None)
+        await message.reply_text("This student is already connected to Telegram.")
+        await _send_admin_student_detail(context, connect_state, student_key, student, message)
+        return True
+
+    input_text = raw_text.lstrip()
+    if input_text.startswith("@"):
+        input_text = input_text[1:]
+    telegram_id: Optional[int] = None
+    handle_value: Optional[str] = None
+    if input_text.isdigit() and not raw_text.startswith("@"):
+        telegram_id = int(input_text)
+        handle_value = student.get("telegram_handle")
+    else:
+        normalized = normalize_handle(input_text)
+        if not normalized:
+            await message.reply_text("Please enter a valid Telegram handle or numeric ID.")
+            return True
+        bot = getattr(context, "bot", None) or getattr(
+            getattr(context, "application", None), "bot", None
+        )
+        handle_value = normalized
+        if bot and hasattr(bot, "get_chat"):
+            try:
+                chat = await bot.get_chat(f"@{normalized}")
+                telegram_id = int(chat.id)
+                username = getattr(chat, "username", None)
+                handle_value = normalize_handle(username) if username else normalized
+            except Exception:
+                telegram_id = None
+        else:
+            telegram_id = None
+
+    student["telegram_mode"] = True
+    if telegram_id:
+        student["telegram_id"] = int(telegram_id)
+        student.pop("needs_id", None)
+    else:
+        student["telegram_id"] = None
+        student["needs_id"] = True
+    student["telegram_handle"] = handle_value
+
+    new_key = student_key
+    if telegram_id:
+        new_key = str(int(telegram_id))
+    if new_key != student_key:
+        students.pop(student_key, None)
+    students[new_key] = student
+    save_students(students)
+
+    if new_key != student_key:
+        logs = load_logs()
+        changed = False
+        for entry in logs:
+            if entry.get("student") == student_key:
+                entry["student"] = new_key
+                changed = True
+        if changed:
+            save_logs(logs)
+
+    application = getattr(context, "application", None)
+    job_queue = getattr(application, "job_queue", None) if application else None
+    if (
+        telegram_id
+        and application
+        and job_queue
+        and hasattr(job_queue, "run_once")
+        and callable(getattr(job_queue, "jobs", None))
+    ):
+        try:
+            schedule_student_reminders(application, new_key, student)
+            schedule_final_set_notice(application, new_key, student)
+        except Exception:
+            logging.warning("Failed to schedule reminders for %s", student.get("name", new_key))
+
+    bot = getattr(context, "bot", None) or getattr(application, "bot", None)
+    if telegram_id and bot:
+        try:
+            await refresh_student_menu(new_key, student, bot)
+        except Exception:
+            logging.debug("Failed to refresh student menu for %s", new_key)
+
+    context.user_data.pop("connect_student", None)
+
+    student_name = student.get("name", new_key)
+    if telegram_id:
+        handle_label = f" (@{handle_value})" if handle_value else ""
+        summary = (
+            f"Connected {student_name} to Telegram ID {telegram_id}{handle_label}."
+        )
+    else:
+        summary = (
+            f"Stored @{handle_value} for {student_name}. "
+            "They will be fully linked once they /start the bot or you run /resolveids."
+        )
+    await message.reply_text(summary)
+    await _send_admin_student_detail(context, connect_state, new_key, student, message)
+    return True
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle free-form messages for both admins and students."""
     user = update.effective_user
@@ -4015,6 +4378,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user_id = user.id if user else None
     if user_id in ADMIN_IDS:
+        if await process_connect_student_reply(update, context, students):
+            return
         renew_id = context.user_data.get("renew_waiting_for_qty")
         if renew_id:
             await renew_received_count(update, context)
@@ -4246,7 +4611,11 @@ async def maybe_send_balance_warning(bot, student) -> bool:
 
     Returns True if the student's record was modified (i.e., a warning was sent).
     """
-    if student.get("paused") or is_premium(student):
+    if (
+        student.get("paused")
+        or not student.get("telegram_mode", True)
+        or is_premium(student)
+    ):
         return False
     remaining = student.get("classes_remaining", 0)
     last_sent = student.get("last_balance_warning")
@@ -4344,6 +4713,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(
         CallbackQueryHandler(
+            connect_student_callback, pattern=r"^stu:CONNECT:[^:]+$"
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
             handle_student_action,
             pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):[^:]+$",
         )
@@ -4412,6 +4786,12 @@ def main() -> None:
         ],
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
+            ADD_TELEGRAM_CHOICE: [
+                CallbackQueryHandler(
+                    add_telegram_choice,
+                    pattern=r"^student_(has_telegram|no_telegram|cancel)$",
+                )
+            ],
             ADD_HANDLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_handle)],
             ADD_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_classes)],
             ADD_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_schedule)],
@@ -4456,6 +4836,11 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_time_slot_callback, pattern="^edit:time:slot:"))
     application.add_handler(CallbackQueryHandler(edit_time_scope_callback, pattern="^edit:time:scope:"))
     application.add_handler(CallbackQueryHandler(edit_time_oncepick_callback, pattern="^edit:time:oncepick:"))
+    application.add_handler(
+        CallbackQueryHandler(
+            connect_student_callback, pattern=r"^stu:CONNECT:[^:]+$"
+        )
+    )
     application.add_handler(
         CallbackQueryHandler(
             handle_student_action,
