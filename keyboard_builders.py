@@ -7,6 +7,7 @@ def build_student_submenu(student_id: str) -> InlineKeyboardMarkup:
 
     Callback data strings follow the ``stu:<ACTION>:<id>`` convention.
     """
+    student_id = str(student_id)
     buttons = [
         [
             InlineKeyboardButton("✅ Log Class", callback_data=f"stu:LOG:{student_id}"),
