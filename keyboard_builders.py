@@ -1,6 +1,14 @@
 from typing import Dict, Any, Tuple
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+try:  # pragma: no cover - circular import guard during module init
+    from class_track_bot import fmt_bkk
+except ImportError:  # pragma: no cover
+    def fmt_bkk(dt, add_label: bool = False):
+        from class_track_bot import fmt_bkk as _fmt_bkk
+
+        return _fmt_bkk(dt, add_label=add_label)
+
 
 def build_student_submenu(student_id: str) -> InlineKeyboardMarkup:
     """Return the admin submenu for a student.
@@ -55,7 +63,7 @@ def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple
     if upcoming:
         lines.append("Upcoming classes:")
         for dt in upcoming:
-            lines.append(f" - {dt}")
+            lines.append(f" - {fmt_bkk(dt)}")
     else:
         lines.append("No upcoming classes")
 
