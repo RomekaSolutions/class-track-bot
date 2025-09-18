@@ -169,19 +169,33 @@ def bkk_min():
     return datetime.min.replace(tzinfo=BKK_TZ)
 
 
+def _ordinal_suffix(day: int) -> str:
+    """Return the ordinal suffix for ``day`` (1 -> "st", etc.)."""
+
+    if 10 <= day % 100 <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
+
 def fmt_bkk(dt, add_label: bool = False):
     """Format datetime for human display in Bangkok timezone.
 
     Parameters
     ----------
     dt:
-        Datetime or parseable string.
+        Datetime, date or parseable string.
     add_label:
         If True, append ``" ICT"`` to the formatted string.
     """
 
+    if isinstance(dt, date) and not isinstance(dt, datetime):
+        dt = datetime.combine(dt, time.min)
     dt = ensure_bangkok(dt)
-    text = dt.strftime("%a %d %b %H:%M")
+
+    day_suffix = _ordinal_suffix(dt.day)
+    text = f"{dt.strftime('%a')} {dt.day}{day_suffix}"
+    if any((dt.hour, dt.minute, dt.second, dt.microsecond)):
+        text += dt.strftime(" %H:%M")
     if add_label:
         text += " ICT"
     return text
@@ -1977,7 +1991,10 @@ def generate_dashboard_summary() -> str:
 
     students = load_students()
     logs = load_logs()
-    now = datetime.now()
+    try:
+        now = datetime.now(BASE_TZ)  # type: ignore[arg-type]
+    except TypeError:
+        now = datetime.now(BKK_TZ)
     today = now.date()
     month_start = date(now.year, now.month, 1)
     premium_count = sum(1 for s in students.values() if is_premium(s))
@@ -1989,7 +2006,7 @@ def generate_dashboard_summary() -> str:
         duration = s.get("class_duration_hours", DEFAULT_DURATION_HOURS)
         total_hours += len(entries) * duration
 
-    today_classes: List[str] = []
+    today_class_entries: List[Tuple[datetime, str]] = []
     low_balance: List[str] = []
     upcoming_renewals: List[str] = []
     overdue_renewals: List[str] = []
@@ -2018,21 +2035,28 @@ def generate_dashboard_summary() -> str:
 
     for sid, student in students.items():
         tz = student_timezone(student)
-        today_student = datetime.now(tz).date()
+        today_student = today
 
         if student.get("paused"):
             paused_students.append(student["name"])
         else:
-            # Consider both past and upcoming unlogged classes for today
-            candidates = get_admin_visible_classes(
-                sid, student, count=3
-            ) + get_admin_upcoming_classes(sid, student, count=3)
-            for dt in candidates:
-                if dt.astimezone(tz).date() == today_student:
-                    today_classes.append(
-                        f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}"
+            for dt_str in student.get("class_dates", []):
+                if not dt_str:
+                    continue
+                try:
+                    class_dt = parse_student_datetime(dt_str, student)
+                except ValueError:
+                    logging.warning(
+                        "Skipping invalid class date for %s: %s",
+                        student.get("name", sid),
+                        dt_str,
                     )
-                    break
+                    continue
+                class_dt_local = class_dt.astimezone(tz)
+                if class_dt_local.date() == today_student:
+                    today_class_entries.append(
+                        (class_dt_local, f"{student['name']} at {class_dt_local.strftime('%H:%M')}")
+                    )
 
         if not is_premium(student):
             remaining = student.get("classes_remaining", 0)
@@ -2044,11 +2068,11 @@ def generate_dashboard_summary() -> str:
                 last_date = last_class.date()
                 if last_date < today:
                     overdue_renewals.append(
-                        f"{student['name']} ({last_date.isoformat()})"
+                        f"{student['name']} ({fmt_bkk(last_date)})"
                     )
                 elif today <= last_date <= today + timedelta(days=7):
                     upcoming_renewals.append(
-                        f"{student['name']} ({last_date.isoformat()})"
+                        f"{student['name']} ({fmt_bkk(last_date)})"
                     )
 
         if student.get("free_class_credit", 0) > 0:
@@ -2056,12 +2080,17 @@ def generate_dashboard_summary() -> str:
                 f"{student['name']} ({student['free_class_credit']})"
             )
 
+    today_classes = [
+        label for _, label in sorted(today_class_entries, key=lambda item: item[0])
+    ]
+
     lines: List[str] = ["📊 Dashboard Summary", ""]
-    lines.append(f"Active students: {len(active_students)}")
-    lines.append(f"Premium students: {premium_count}")
+    lines.append(
+        f"Active students: {len(active_students)} ({premium_count} premium)"
+    )
     lines.append(f"Total scheduled hours/week: {total_hours:.1f}")
     lines.append("")
-    lines.append(f"Today's classes ({today.isoformat()}):")
+    lines.append(f"Today's classes ({fmt_bkk(today)}):")
     if today_classes:
         lines.extend(f"- {item}" for item in today_classes)
     else:
