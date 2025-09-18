@@ -4305,6 +4305,11 @@ async def process_connect_student_reply(
     if telegram_id:
         new_key = str(int(telegram_id))
     if new_key != student_key:
+        if new_key in students:
+            await update.message.reply_text(
+                "❌ Error: A student with that Telegram ID already exists. Please check the ID and try again."
+            )
+            return
         students.pop(student_key, None)
     students[new_key] = student
     save_students(students)
