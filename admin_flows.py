@@ -52,6 +52,16 @@ def _parse_iso(dt_str: str) -> datetime:
     return dt
 
 
+def _format_display_dt(iso_str: str) -> str:
+    """Return a human-friendly representation of ``iso_str`` for admins."""
+
+    try:
+        dt = _parse_iso(iso_str).astimezone(BASE_TZ)
+    except Exception:
+        return iso_str
+    return dt.strftime("%a %d %b %H:%M")
+
+
 def get_admin_visible_classes(
     student_id: str, student: Dict[str, Any], limit: int = 8
 ) -> List[str]:
@@ -675,11 +685,11 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
         )
         await safe_edit_or_send(
             query,
-            f"Log class at {iso_dt}:",
+            f"Log class at {_format_display_dt(iso_dt)}:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
     elif action == "CANCEL":
-        text = f"Cancel class at {iso_dt}?"
+        text = f"Cancel class at {_format_display_dt(iso_dt)}?"
         confirm = f"cfm:CANCEL:{student_id}:{iso_dt}"
         buttons = [
             [InlineKeyboardButton("Confirm", callback_data=confirm)],
@@ -687,7 +697,7 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
         ]
         await safe_edit_or_send(query, text, reply_markup=InlineKeyboardMarkup(buttons))
     elif action == "RESHED":
-        text = f"Reschedule class at {iso_dt}. Choose new time:"
+        text = f"Reschedule class at {_format_display_dt(iso_dt)}. Choose new time:"
         buttons = [
             [
                 InlineKeyboardButton(
@@ -738,7 +748,7 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
         schedule_student_reminders(context.application, student_id, student)
         await send_low_balance_if_threshold(context.application, student_id, student)
         schedule_final_set_notice(context.application, student_id, student)
-        msg = f"Class at {iso_dt} cancelled."
+        msg = f"Class at {_format_display_dt(iso_dt)} cancelled."
         await safe_edit_or_send(query, msg, reply_markup=_back_markup(student_id))
         return
     elif action == "RESHED":
@@ -772,7 +782,10 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
         schedule_student_reminders(context.application, student_id, student)
         schedule_final_set_notice(context.application, student_id, student)
         text, markup = keyboard_builders.build_student_detail_view(student_id, student)
-        msg = f"Class moved from {iso_dt} to {new_iso}.\n\n{text}"
+        msg = (
+            f"Class moved from {_format_display_dt(iso_dt)} to "
+            f"{_format_display_dt(new_iso)}.\n\n{text}"
+        )
         await safe_edit_or_send(query, msg, reply_markup=markup)
         return
     else:
@@ -802,7 +815,7 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if action == "UNLOG":
         removed = data_store.remove_class_log(student_id, iso_dt)
         if removed:
-            msg = f"Log removed for {iso_dt}."
+            msg = f"Log removed for {_format_display_dt(iso_dt)}."
         else:
             msg = "No matching log entry found."
     elif action == "COMPLETE":
@@ -817,7 +830,7 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             schedule_student_reminders(context.application, student_id, student)
             await send_low_balance_if_threshold(context.application, student_id, student)
             schedule_final_set_notice(context.application, student_id, student)
-        msg = f"Class at {iso_dt} logged as completed."
+        msg = f"Class at {_format_display_dt(iso_dt)} logged as completed."
     elif action in {"CANCEL_EARLY", "CANCEL_LATE"}:
         cutoff = 99999 if action == "CANCEL_EARLY" else 0
         data_store.cancel_single_class(student_id, iso_dt, cutoff)
@@ -832,9 +845,9 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await send_low_balance_if_threshold(context.application, student_id, student)
             schedule_final_set_notice(context.application, student_id, student)
         label = "cancelled late" if action == "CANCEL_LATE" else "cancelled early"
-        msg = f"Class at {iso_dt} logged as {label}."
+        msg = f"Class at {_format_display_dt(iso_dt)} logged as {label}."
     else:
         data_store.log_class_status(student_id, iso_dt, "rescheduled")
-        msg = f"Class at {iso_dt} logged as rescheduled."
+        msg = f"Class at {_format_display_dt(iso_dt)} logged as rescheduled."
 
     await safe_edit_or_send(query, msg, reply_markup=_back_markup(student_id))

@@ -461,10 +461,9 @@ def migrate_student_dates(students: Dict[str, Any]) -> bool:
     ADD_CLASSES,
     ADD_SCHEDULE,
     ADD_CUTOFF,
-    ADD_WEEKS,
     ADD_DURATION,
     ADD_TELEGRAM_CHOICE,
-) = range(8)
+) = range(7)
 
 def load_students() -> Dict[str, Any]:
     """Load students from the JSON file and normalize legacy records."""
@@ -1426,23 +1425,7 @@ async def add_cutoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ADD_CUTOFF
     context.user_data["cutoff_hours"] = cutoff
-    await update.message.reply_text(
-        "Length of the repeating cycle in weeks (e.g., 4 for a monthly cycle):"
-    )
-    return ADD_WEEKS
-
-
-async def add_weeks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        weeks = int(update.message.text.strip())
-        if weeks <= 0 or weeks > 26:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text(
-            "Invalid number. Length of the repeating cycle in weeks (1-26, e.g., 4):"
-        )
-        return ADD_WEEKS
-    context.user_data["cycle_weeks"] = weeks
+    context.user_data["cycle_weeks"] = DEFAULT_CYCLE_WEEKS
     await update.message.reply_text(
         "Class length in hours (e.g., 1.5 for 90 minutes):"
     )
@@ -3243,7 +3226,12 @@ async def reschedule_student_command(update: Update, context: ContextTypes.DEFAU
     )
     save_logs(logs)
 
-    msg = f"Rescheduled {student.get('name', student_key)} from {old_item} to {new_dt_str}."
+    old_display = fmt_bkk(old_item)
+    new_display = fmt_bkk(new_dt_str)
+    msg = (
+        f"Rescheduled {student.get('name', student_key)} "
+        f"from {old_display} to {new_display}."
+    )
     if warn_msg:
         msg += f" {warn_msg}"
     await update.message.reply_text(msg)
@@ -4579,8 +4567,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     }
                 )
                 save_logs(logs)
+                old_display = fmt_bkk(old_dt_str)
+                new_display = fmt_bkk(new_dt)
                 await update.message.reply_text(
-                    f"Rescheduled class from {old_dt_str} to {new_dt.isoformat()}.",
+                    f"Rescheduled class from {old_display} to {new_display}.",
                     reply_markup=InlineKeyboardMarkup(
                         [[InlineKeyboardButton("Back", callback_data=f"edit:pick:{student_key}")]]
                     ),
@@ -4830,7 +4820,6 @@ def main() -> None:
             ADD_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_classes)],
             ADD_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_schedule)],
             ADD_CUTOFF: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_cutoff)],
-            ADD_WEEKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_weeks)],
             ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_duration)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
