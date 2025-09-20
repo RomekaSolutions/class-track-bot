@@ -8,9 +8,9 @@ import class_track_bot as bot
 
 def test_list_students_command(tmp_path, monkeypatch):
     data = {
-        "1": {"name": "Alice", "telegram_handle": "alice", "paused": False},
-        "2": {"name": "Bob", "telegram_id": 42, "paused": False},
-        "3": {"name": "Charlie", "telegram_handle": "charlie", "paused": True},
+        "1": {"name": "Alice", "telegram_id": 1, "telegram_handle": "alice", "paused": False},
+        "42": {"name": "Bob", "telegram_id": 42, "paused": False},
+        "43": {"name": "Charlie", "telegram_id": 43, "telegram_handle": "charlie", "paused": True},
     }
     students_file = tmp_path / "students.json"
     students_file.write_text(json.dumps(data))

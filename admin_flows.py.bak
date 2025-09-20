@@ -8,7 +8,6 @@ from telegram.ext import ContextTypes
 
 import data_store
 import keyboard_builders
-from data_store import load_logs, load_students, save_logs, save_students
 from helpers import (
     fmt_class_label,
     generate_from_pattern,
@@ -17,11 +16,6 @@ from helpers import (
     Slot,
 )
 
-
-try:
-    from class_track_bot import BASE_TZ  # type: ignore
-except Exception:  # pragma: no cover - fallback for circular import during init
-    BASE_TZ = timezone(timedelta(hours=7))
 
 STUDENT_NOT_FOUND_MSG = (
     "❌ This student was not found — they may have been removed or renamed."
@@ -50,16 +44,6 @@ def _parse_iso(dt_str: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
-
-
-def _format_display_dt(iso_str: str) -> str:
-    """Return a human-friendly representation of ``iso_str`` for admins."""
-
-    try:
-        dt = _parse_iso(iso_str).astimezone(BASE_TZ)
-    except Exception:
-        return iso_str
-    return dt.strftime("%a %d %b %H:%M")
 
 
 def get_admin_visible_classes(
@@ -435,6 +419,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     stu = students.get(str(student_id), {})
     stu["class_dates"] = [dt.isoformat() for dt in generated]
     stu["classes_remaining"] = qty
+    stu["renewal_date"] = generated[-1].isoformat()
     stu["cancelled_dates"] = stu.get("cancelled_dates", [])
     valid, reason = validate_student_record(stu)
     if not valid:
@@ -458,25 +443,14 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "qty": qty,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "schedule": "pattern_reused",
+            "renewal_date": generated[-1].isoformat(),
         }
     )
-
-    from class_track_bot import (
-        schedule_student_reminders,
-        send_low_balance_if_threshold,
-        schedule_final_set_notice,
-    )
-    # In test contexts, ContextTypes.DEFAULT_TYPE may be a dummy without .application
-    if not hasattr(context, "application"):
-        return
-    schedule_student_reminders(context.application, student_id, stu)
-    await send_low_balance_if_threshold(context.application, student_id, stu)
-    schedule_final_set_notice(context.application, student_id, stu)
 
     text, markup = keyboard_builders.build_student_detail_view(student_id, stu)
     msg = (
         f"Renewed {qty} for {stu.get('name', student_id)}. "
-        f"Set ends: {generated[-1].date().isoformat()}."
+        f"New renewal date: {generated[-1].date().isoformat()}."
     )
     await safe_edit_or_send(query, f"{msg}\n\n{text}", reply_markup=markup)
 
@@ -543,42 +517,11 @@ async def initiate_remove_student(query, context, student_id: str, student: Dict
 
 
 async def initiate_adhoc_class(query, context, student_id: str, student: Dict[str, Any]):
-    """Use one class credit for an adhoc/extra hour session."""
-
-    students = load_students()
-    student = students.get(student_id)
-    if not student:
-        return await safe_edit_or_send(query, "Student not found.")
-
-    # Check if student has classes remaining
-    classes_remaining = student.get("classes_remaining", 0)
-    if classes_remaining <= 0:
-        return await safe_edit_or_send(
-            query,
-            f"❌ {student.get('name', student_id)} has no classes remaining.",
-            reply_markup=_back_markup(student_id),
-        )
-
-    # Subtract 1 from classes_remaining (that's all we do)
-    student["classes_remaining"] = classes_remaining - 1
-
-    save_students(students)
-
-    # Log the action
-    logs = load_logs()
-    logs.append({
-        "student": student_id,
-        "date": datetime.now(BASE_TZ).isoformat(),
-        "status": "adhoc_class_used",
-        "note": "admin used class credit for adhoc/extra hour",
-        "admin": query.from_user.id if query.from_user else None,
-    })
-    save_logs(logs)
-
-    text = f"✅ Used 1 class credit for {student.get('name', student_id)}\n"
-    text += f"Remaining classes: {student['classes_remaining']}"
-
-    await safe_edit_or_send(query, text, reply_markup=_back_markup(student_id))
+    await safe_edit_or_send(
+        query,
+        f"Coming soon: adhoc class for {student.get('name', student_id)}",
+        reply_markup=_back_markup(student_id),
+    )
 
 
 actions_map: Dict[str, Callable] = {
@@ -605,14 +548,13 @@ async def handle_student_action(update: Update, context: ContextTypes.DEFAULT_TY
         return
     await query.answer()
     logging.debug("handle_student_action data=%s", query.data)
-    data = query.data or ""
-    if not data.startswith("stu:"):
+    match = re.match(
+        r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):([^:]+)$",
+        query.data,
+    )
+    if not match:
         return
-    try:
-        _, action, student_id = data.split(":", 2)
-    except ValueError:
-        logging.warning("Malformed student action callback: %s", data)
-        return
+    action, student_id = match.group(1), match.group(2)
     student = data_store.get_student_by_id(student_id)
     if not student:
         await safe_edit_or_send(query, STUDENT_NOT_FOUND_MSG)
@@ -685,11 +627,11 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
         )
         await safe_edit_or_send(
             query,
-            f"Log class at {_format_display_dt(iso_dt)}:",
+            f"Log class at {iso_dt}:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
     elif action == "CANCEL":
-        text = f"Cancel class at {_format_display_dt(iso_dt)}?"
+        text = f"Cancel class at {iso_dt}?"
         confirm = f"cfm:CANCEL:{student_id}:{iso_dt}"
         buttons = [
             [InlineKeyboardButton("Confirm", callback_data=confirm)],
@@ -697,7 +639,7 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
         ]
         await safe_edit_or_send(query, text, reply_markup=InlineKeyboardMarkup(buttons))
     elif action == "RESHED":
-        text = f"Reschedule class at {_format_display_dt(iso_dt)}. Choose new time:"
+        text = f"Reschedule class at {iso_dt}. Choose new time:"
         buttons = [
             [
                 InlineKeyboardButton(
@@ -735,20 +677,7 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
         iso_dt = payload
         cutoff = student.get("cutoff_hours", 24)
         data_store.cancel_single_class(student_id, iso_dt, cutoff)
-        student = data_store.get_student_by_id(student_id)
-        from class_track_bot import (
-            schedule_student_reminders,
-            send_low_balance_if_threshold,
-            schedule_final_set_notice,
-        )
-        if not hasattr(context, "application"):
-            return
-        if not hasattr(context, "application"):
-            return
-        schedule_student_reminders(context.application, student_id, student)
-        await send_low_balance_if_threshold(context.application, student_id, student)
-        schedule_final_set_notice(context.application, student_id, student)
-        msg = f"Class at {_format_display_dt(iso_dt)} cancelled."
+        msg = f"Class at {iso_dt} cancelled."
         await safe_edit_or_send(query, msg, reply_markup=_back_markup(student_id))
         return
     elif action == "RESHED":
@@ -773,19 +702,8 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
             )
             return
         student = data_store.get_student_by_id(student_id)
-        from class_track_bot import (
-            schedule_student_reminders,
-            schedule_final_set_notice,
-        )
-        if not hasattr(context, "application"):
-            return
-        schedule_student_reminders(context.application, student_id, student)
-        schedule_final_set_notice(context.application, student_id, student)
         text, markup = keyboard_builders.build_student_detail_view(student_id, student)
-        msg = (
-            f"Class moved from {_format_display_dt(iso_dt)} to "
-            f"{_format_display_dt(new_iso)}.\n\n{text}"
-        )
+        msg = f"Class moved from {iso_dt} to {new_iso}.\n\n{text}"
         await safe_edit_or_send(query, msg, reply_markup=markup)
         return
     else:
@@ -815,39 +733,19 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if action == "UNLOG":
         removed = data_store.remove_class_log(student_id, iso_dt)
         if removed:
-            msg = f"Log removed for {_format_display_dt(iso_dt)}."
+            msg = f"Log removed for {iso_dt}."
         else:
             msg = "No matching log entry found."
-    elif action == "COMPLETE":
-        data_store.mark_class_completed(student_id, iso_dt)
-        student = data_store.get_student_by_id(student_id)
-        from class_track_bot import (
-            schedule_student_reminders,
-            send_low_balance_if_threshold,
-            schedule_final_set_notice,
-        )
-        if context and hasattr(context, "application"):
-            schedule_student_reminders(context.application, student_id, student)
-            await send_low_balance_if_threshold(context.application, student_id, student)
-            schedule_final_set_notice(context.application, student_id, student)
-        msg = f"Class at {_format_display_dt(iso_dt)} logged as completed."
-    elif action in {"CANCEL_EARLY", "CANCEL_LATE"}:
-        cutoff = 99999 if action == "CANCEL_EARLY" else 0
-        data_store.cancel_single_class(student_id, iso_dt, cutoff)
-        student = data_store.get_student_by_id(student_id)
-        from class_track_bot import (
-            schedule_student_reminders,
-            send_low_balance_if_threshold,
-            schedule_final_set_notice,
-        )
-        if context and hasattr(context, "application"):
-            schedule_student_reminders(context.application, student_id, student)
-            await send_low_balance_if_threshold(context.application, student_id, student)
-            schedule_final_set_notice(context.application, student_id, student)
-        label = "cancelled late" if action == "CANCEL_LATE" else "cancelled early"
-        msg = f"Class at {_format_display_dt(iso_dt)} logged as {label}."
     else:
-        data_store.log_class_status(student_id, iso_dt, "rescheduled")
-        msg = f"Class at {_format_display_dt(iso_dt)} logged as rescheduled."
+        status_map = {
+            "COMPLETE": "completed",
+            "CANCEL_EARLY": "cancelled_early",
+            "CANCEL_LATE": "cancelled_late",
+            "RESCHEDULED": "rescheduled",
+        }
+        status = status_map[action]
+        data_store.log_class_status(student_id, iso_dt, status)
+        # TODO: allow picking a new date when rescheduling in the future
+        msg = f"Class at {iso_dt} logged as {status.replace('_', ' ')}."
 
     await safe_edit_or_send(query, msg, reply_markup=_back_markup(student_id))
