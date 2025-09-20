@@ -41,7 +41,7 @@ import logging
 import os
 import inspect
 from datetime import datetime, timedelta, time, date, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 
 from telegram import (
     Update,
@@ -138,6 +138,16 @@ DEFAULT_CYCLE_WEEKS = 4
 DEFAULT_DURATION_HOURS = 1.0
 # Offset before class time to send reminder
 DEFAULT_REMINDER_OFFSET = timedelta(hours=1)
+DEFAULT_REMINDER_MINUTES = int(DEFAULT_REMINDER_OFFSET.total_seconds() // 60)
+
+# Supported reminder choices exposed to students (minutes -> label)
+REMINDER_OPTIONS: List[Tuple[int, str]] = [
+    (60, "1 hour (default)"),
+    (30, "30 minutes"),
+    (15, "15 minutes"),
+    (5, "5 minutes"),
+    (0, "None"),
+]
 
 # Base timezone for all operations (Bangkok time)
 BASE_TZ = pytz.timezone("Asia/Bangkok")
@@ -199,6 +209,92 @@ def fmt_bkk(dt, add_label: bool = False):
     if add_label:
         text += " ICT"
     return text
+
+
+REMINDER_LABEL_MAP = dict(REMINDER_OPTIONS)
+REMINDER_VALID_MINUTES = set(REMINDER_LABEL_MAP)
+
+
+def normalize_reminder_minutes(value: Any) -> int:
+    """Return a supported reminder offset in minutes from arbitrary input."""
+
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_REMINDER_MINUTES
+    if minutes < 0:
+        return 0
+    if minutes not in REMINDER_VALID_MINUTES:
+        return DEFAULT_REMINDER_MINUTES
+    return minutes
+
+
+def get_student_reminder_minutes(student: Dict[str, Any]) -> int:
+    """Return the reminder preference for ``student`` in minutes."""
+
+    raw = student.get("reminder_offset_minutes", DEFAULT_REMINDER_MINUTES)
+    return normalize_reminder_minutes(raw)
+
+
+def reminder_setting_sentence(minutes: int) -> str:
+    """Return a human sentence fragment describing ``minutes`` before class."""
+
+    if minutes == 0:
+        return "no reminders"
+    label = REMINDER_LABEL_MAP.get(minutes)
+    if label:
+        base = label.replace(" (default)", "")
+        return f"{base} before class"
+    return f"{minutes} minutes before class"
+
+
+def reminder_setting_summary(minutes: int) -> str:
+    """Return text describing the reminder preference for menu displays."""
+
+    if minutes == 0:
+        return "None (reminders off)"
+    label = REMINDER_LABEL_MAP.get(minutes)
+    if label:
+        if " (default)" in label:
+            base = label.replace(" (default)", "")
+            return f"{base} before class (default)"
+        return f"{label} before class"
+    return f"{minutes} minutes before class"
+
+
+def build_notification_settings_keyboard(current_minutes: int) -> InlineKeyboardMarkup:
+    """Return the inline keyboard for the notification settings view."""
+
+    rows: List[List[InlineKeyboardButton]] = []
+    for minutes, label in REMINDER_OPTIONS:
+        prefix = "✅ " if minutes == current_minutes else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{prefix}{label}",
+                    callback_data=f"notification_set:{minutes}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_notification_settings_view(
+    student: Dict[str, Any],
+    *,
+    status: Optional[str] = None,
+) -> Tuple[str, InlineKeyboardMarkup]:
+    """Return text and keyboard for the notification settings screen."""
+
+    current_minutes = get_student_reminder_minutes(student)
+    lines: List[str] = []
+    if status:
+        lines.append(status)
+        lines.append("")
+    lines.append("Choose when you'd like to receive reminders before class.")
+    lines.append(f"Current setting: {reminder_setting_summary(current_minutes)}.")
+    return "\n".join(lines), build_notification_settings_keyboard(current_minutes)
 
 
 def _parse_iso(dt_str: str) -> datetime:
@@ -384,6 +480,13 @@ def normalize_students(students: Dict[str, Any]) -> bool:
             changed = True
         if "class_duration_hours" not in student:
             student["class_duration_hours"] = DEFAULT_DURATION_HOURS
+            changed = True
+        raw_minutes = student.get("reminder_offset_minutes")
+        normalized_minutes = normalize_reminder_minutes(
+            DEFAULT_REMINDER_MINUTES if raw_minutes is None else raw_minutes
+        )
+        if raw_minutes != normalized_minutes:
+            student["reminder_offset_minutes"] = normalized_minutes
             changed = True
         # Drop legacy per-student timezone field
         if "student_timezone" in student:
@@ -816,19 +919,40 @@ async def send_class_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         logging.warning("Failed to send class reminder to %s", student.get("name"))
 
 
+def resolve_reminder_offset(
+    student: Dict[str, Any], reminder_offset: Optional[Union[int, timedelta]]
+) -> Optional[timedelta]:
+    """Return a :class:`timedelta` for reminder scheduling or ``None`` to skip."""
+
+    if isinstance(reminder_offset, timedelta):
+        if reminder_offset.total_seconds() <= 0:
+            return None
+        return reminder_offset
+    if reminder_offset is None:
+        minutes = get_student_reminder_minutes(student)
+    else:
+        minutes = normalize_reminder_minutes(reminder_offset)
+    if minutes <= 0:
+        return None
+    return timedelta(minutes=minutes)
+
+
 def schedule_class_reminder(
     application: Application,
     student_key: str,
     student: Dict[str, Any],
     class_dt_str: str,
-    reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
+    reminder_offset: Optional[Union[int, timedelta]] = None,
 ) -> None:
+    reminder_delta = resolve_reminder_offset(student, reminder_offset)
+    if reminder_delta is None:
+        return
     now = ensure_bangkok(datetime.now())
     try:
         class_dt = ensure_bangkok(class_dt_str)
     except Exception:
         return
-    run_time = class_dt - reminder_offset
+    run_time = class_dt - reminder_delta
     if run_time <= now:
         return
     application.job_queue.run_once(
@@ -843,23 +967,26 @@ def schedule_student_reminders(
     application: Application,
     student_key: str,
     student: Dict[str, Any],
-    reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
+    reminder_offset: Optional[Union[int, timedelta]] = None,
 ) -> None:
     """Schedule reminder jobs for all future classes of a student."""
     if not student.get("telegram_mode", True):
         return
     if not student.get("telegram_id"):
         return
+    reminder_delta = resolve_reminder_offset(student, reminder_offset)
     prefix = f"class_reminder:{student_key}:"
     # remove existing reminder jobs for this student
     for job in application.job_queue.jobs():
         if job.name and job.name.startswith(prefix):
             job.schedule_removal()
+    if reminder_delta is None:
+        return
     for item in student.get("class_dates", []):
         if item in student.get("cancelled_dates", []):
             continue
         schedule_class_reminder(
-            application, student_key, student, item, reminder_offset
+            application, student_key, student, item, reminder_delta
         )
 
 
@@ -1502,6 +1629,7 @@ async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         "cutoff_hours": context.user_data.get("cutoff_hours"),
         "cycle_weeks": cycle_weeks,
         "class_duration_hours": context.user_data.get("class_duration_hours"),
+        "reminder_offset_minutes": DEFAULT_REMINDER_MINUTES,
         "paused": False,
         "free_class_credit": 0,
         "reschedule_credit": 0,
@@ -1559,6 +1687,7 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             "class_dates": context.user_data.get("class_dates", []),
             "classes_remaining": context.user_data.get("classes_remaining", 0),
             "cancelled_dates": [],
+            "reminder_offset_minutes": DEFAULT_REMINDER_MINUTES,
             "telegram_mode": bool(telegram_mode),
         }
         if key:
@@ -3760,11 +3889,14 @@ def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMar
         last_class = get_last_class(student)
         if last_class:
             lines.append(f"Set ends: {last_class.date().isoformat()}")
+    reminder_minutes = get_student_reminder_minutes(student)
+    lines.append(f"Reminder notifications: {reminder_setting_summary(reminder_minutes)}")
     if student.get("paused"):
         lines.append("Your plan is currently paused. Contact your teacher to resume.")
     buttons = [
         [InlineKeyboardButton("📅 My Classes", callback_data="my_classes")],
         [InlineKeyboardButton("❌ Cancel Class", callback_data="cancel_class")],
+        [InlineKeyboardButton("🔔 Notification Settings", callback_data="notification_settings")],
     ]
     if student.get("free_class_credit", 0) > 0:
         buttons.append([InlineKeyboardButton("🎁 Free Class Credit", callback_data="free_credit")])
@@ -3974,6 +4106,20 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
             await initiate_cancel_class(query, student)
         elif data == "free_credit":
             await show_free_credit(query, student)
+        elif data == "notification_settings":
+            await show_notification_settings(query, student)
+        elif data and data.startswith("notification_set:"):
+            try:
+                minutes = int(data.split(":", 1)[1])
+            except (TypeError, ValueError):
+                try:
+                    await query.answer("Invalid option.", show_alert=True)
+                except Exception:
+                    pass
+            else:
+                await update_notification_setting(
+                    query, student_key, student, students, minutes, context
+                )
         elif data == "cancel_withdraw":
             await handle_cancel_withdraw(
                 query, student_key, student, students, context
@@ -4684,6 +4830,44 @@ async def show_free_credit(query, student: Dict[str, Any]) -> None:
     await safe_edit_or_send(query, msg)
 
 
+async def show_notification_settings(query, student: Dict[str, Any]) -> None:
+    """Display the notification settings view to a student."""
+
+    text, markup = build_notification_settings_view(student)
+    await safe_edit_or_send(query, text, reply_markup=markup)
+
+
+async def update_notification_setting(
+    query,
+    student_key: str,
+    student: Dict[str, Any],
+    students: Dict[str, Any],
+    minutes: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Persist a new reminder preference and reschedule jobs."""
+
+    if minutes not in REMINDER_VALID_MINUTES:
+        try:
+            await query.answer("Unsupported option.", show_alert=True)
+        except Exception:
+            pass
+        return
+    minutes = normalize_reminder_minutes(minutes)
+    current = get_student_reminder_minutes(student)
+    if current != minutes:
+        student["reminder_offset_minutes"] = minutes
+        save_students(students)
+        if hasattr(context, "application"):
+            schedule_student_reminders(context.application, student_key, student)
+        status = f"✅ Reminders updated to {reminder_setting_sentence(minutes)}."
+        await refresh_student_menu(student_key, student, getattr(context, "bot", None))
+    else:
+        status = f"Your reminders are already set to {reminder_setting_sentence(minutes)}."
+    text, markup = build_notification_settings_view(student, status=status)
+    await safe_edit_or_send(query, text, reply_markup=markup)
+
+
 # -----------------------------------------------------------------------------
 # Automatic jobs (balance warnings, monthly export)
 # -----------------------------------------------------------------------------
@@ -4976,7 +5160,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             student_button_handler,
-            pattern=r"^(my_classes|cancel_class|free_credit|cancel_withdraw|cancel_dismiss|back_to_start)$",
+            pattern=r"^(my_classes|cancel_class|free_credit|cancel_withdraw|cancel_dismiss|back_to_start|notification_settings|notification_set:(?:0|5|15|30|60))$",
         )
     )
     application.add_handler(CallbackQueryHandler(log_unknown_callback, pattern=r".*"))
