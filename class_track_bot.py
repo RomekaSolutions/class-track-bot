@@ -692,6 +692,10 @@ def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List
     strings in the base timezone.  This helper converts them to timezone aware
     ``datetime`` objects, removes past occurrences and any dates present in
     ``cancelled_dates`` and returns the next ``count`` items.
+
+    Non-premium students will never see more entries than indicated by their
+    ``classes_remaining`` value, ensuring the UI stays aligned with purchased
+    credit.
     """
     now = ensure_bangkok(datetime.now())
     cancelled = set(student.get("cancelled_dates", []))
@@ -710,7 +714,20 @@ def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List
             continue
         results.append(dt)
     results.sort()
-    return results[:count]
+
+    if is_premium(student):
+        visible_cap = count
+    else:
+        remaining_raw = student.get("classes_remaining")
+        try:
+            remaining = int(remaining_raw)
+        except (TypeError, ValueError):
+            remaining = 0
+        if remaining < 0:
+            remaining = 0
+        visible_cap = min(count, remaining)
+
+    return results[:visible_cap]
 
 
 def get_admin_visible_classes(
