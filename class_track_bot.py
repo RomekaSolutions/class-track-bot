@@ -214,6 +214,10 @@ def fmt_bkk(dt, add_label: bool = False):
 REMINDER_LABEL_MAP = dict(REMINDER_OPTIONS)
 REMINDER_VALID_MINUTES = set(REMINDER_LABEL_MAP)
 
+# Student-facing messages used when a plan is paused.
+PAUSED_ACTION_MESSAGE = "Plan is paused - contact your teacher."
+PAUSED_SETTINGS_MESSAGE = "Plan is paused."
+
 
 def normalize_reminder_minutes(value: Any) -> int:
     """Return a supported reminder offset in minutes from arbitrary input."""
@@ -4156,23 +4160,32 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
                 query, student_key, student, show_pending=bool(student.get("pending_cancel"))
             )
         elif data == "cancel_class":
-            await initiate_cancel_class(query, student)
+            if student.get("paused"):
+                await safe_edit_or_send(query, PAUSED_ACTION_MESSAGE)
+            else:
+                await initiate_cancel_class(query, student)
         elif data == "free_credit":
             await show_free_credit(query, student)
         elif data == "notification_settings":
-            await show_notification_settings(query, student)
-        elif data and data.startswith("notification_set:"):
-            try:
-                minutes = int(data.split(":", 1)[1])
-            except (TypeError, ValueError):
-                try:
-                    await query.answer("Invalid option.", show_alert=True)
-                except Exception:
-                    pass
+            if student.get("paused"):
+                await safe_edit_or_send(query, PAUSED_SETTINGS_MESSAGE)
             else:
-                await update_notification_setting(
-                    query, student_key, student, students, minutes, context
-                )
+                await show_notification_settings(query, student)
+        elif data and data.startswith("notification_set:"):
+            if student.get("paused"):
+                await safe_edit_or_send(query, PAUSED_SETTINGS_MESSAGE)
+            else:
+                try:
+                    minutes = int(data.split(":", 1)[1])
+                except (TypeError, ValueError):
+                    try:
+                        await query.answer("Invalid option.", show_alert=True)
+                    except Exception:
+                        pass
+                else:
+                    await update_notification_setting(
+                        query, student_key, student, students, minutes, context
+                    )
         elif data == "cancel_withdraw":
             await handle_cancel_withdraw(
                 query, student_key, student, students, context
@@ -4401,6 +4414,9 @@ async def handle_cancel_dismiss(query, student_key: str, student: Dict[str, Any]
 
 async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
     """Begin the cancellation process.  Show a list of upcoming classes."""
+    if student.get("paused"):
+        await safe_edit_or_send(query, PAUSED_ACTION_MESSAGE)
+        return
     upcoming_list = get_student_cancellable_classes(student)
     if not upcoming_list:
         await safe_edit_or_send(query, "You have no classes to cancel.")
@@ -4436,6 +4452,9 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
         student_key, student = resolve_student(students, user.username)
     if not student:
         await safe_edit_or_send(query, "You are not recognised. Please contact your teacher.")
+        return
+    if student.get("paused"):
+        await safe_edit_or_send(query, PAUSED_ACTION_MESSAGE)
         return
     _, index_str = query.data.split(":")
     try:
@@ -4885,7 +4904,9 @@ async def show_free_credit(query, student: Dict[str, Any]) -> None:
 
 async def show_notification_settings(query, student: Dict[str, Any]) -> None:
     """Display the notification settings view to a student."""
-
+    if student.get("paused"):
+        await safe_edit_or_send(query, PAUSED_SETTINGS_MESSAGE)
+        return
     text, markup = build_notification_settings_view(student)
     await safe_edit_or_send(query, text, reply_markup=markup)
 
@@ -4907,6 +4928,9 @@ async def update_notification_setting(
             pass
         return
     minutes = normalize_reminder_minutes(minutes)
+    if student.get("paused"):
+        await safe_edit_or_send(query, PAUSED_SETTINGS_MESSAGE)
+        return
     current = get_student_reminder_minutes(student)
     if current != minutes:
         student["reminder_offset_minutes"] = minutes
