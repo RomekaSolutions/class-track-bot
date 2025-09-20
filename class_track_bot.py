@@ -3882,6 +3882,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         student["telegram_id"] = int(user_id)
         if new_handle:
             student["telegram_handle"] = new_handle
+        student.pop("needs_id", None)
         save_students(students)
     else:
         updated = False
@@ -3890,6 +3891,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             updated = True
         if new_handle and student.get("telegram_handle") != new_handle:
             student["telegram_handle"] = new_handle
+            updated = True
+        if student.get("needs_id"):
+            student.pop("needs_id", None)
             updated = True
         if updated:
             save_students(students)
