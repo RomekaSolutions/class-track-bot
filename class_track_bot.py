@@ -1569,7 +1569,27 @@ async def add_cutoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ADD_CUTOFF
     context.user_data["cutoff_hours"] = cutoff
-    context.user_data["cycle_weeks"] = DEFAULT_CYCLE_WEEKS
+    schedule_pattern = context.user_data.get("schedule_pattern", "")
+    classes_remaining = context.user_data.get("classes_remaining")
+    cycle_weeks = DEFAULT_CYCLE_WEEKS
+    weekly_slots = 0
+
+    if isinstance(schedule_pattern, str) and schedule_pattern:
+        entries = [item.strip() for item in schedule_pattern.split(",") if item.strip()]
+        for entry in entries:
+            if parse_day_time(entry):
+                weekly_slots += 1
+
+    if (
+        isinstance(classes_remaining, int)
+        and classes_remaining > 0
+        and weekly_slots > 0
+    ):
+        cycle_weeks = (classes_remaining + weekly_slots - 1) // weekly_slots
+        if cycle_weeks < DEFAULT_CYCLE_WEEKS:
+            cycle_weeks = DEFAULT_CYCLE_WEEKS
+
+    context.user_data["cycle_weeks"] = cycle_weeks
     await update.message.reply_text(
         "Class length in hours (e.g., 1.5 for 90 minutes):"
     )
