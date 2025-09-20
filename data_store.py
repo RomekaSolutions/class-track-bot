@@ -195,6 +195,35 @@ def append_log(event: Dict[str, Any]) -> None:
     save_logs(logs)
 
 
+def migrate_log_schemas() -> int:
+    """Add ``date`` field to logs that only have ``at``. Return migrated count."""
+
+    logs = load_logs()
+    migrated = 0
+
+    for entry in logs:
+        if "date" in entry:
+            continue
+
+        at_value = entry.get("at")
+        if not at_value:
+            continue
+
+        try:
+            dt = _parse_iso(str(at_value))
+        except Exception:
+            logging.warning("Failed to migrate log entry: %s", entry)
+            continue
+
+        entry["date"] = dt.isoformat()
+        migrated += 1
+
+    if migrated:
+        save_logs(logs)
+
+    return migrated
+
+
 def migrate_student_records() -> None:
     """Rekey students and logs to use numeric Telegram IDs."""
 
@@ -397,6 +426,8 @@ def mark_class_completed(student_id: str, iso_dt: str) -> bool:
             "type": "class_completed",
             "student_id": student_id,
             "at": iso_dt,
+            "date": iso_dt,
+            "status": "completed",
             "ts": datetime.utcnow().isoformat(),
         }
     )
@@ -431,6 +462,8 @@ def cancel_single_class(student_id: str, iso_dt: str, cutoff_hours: int) -> bool
             "type": "class_cancelled",
             "student_id": student_id,
             "at": iso_dt,
+            "date": iso_dt,
+            "status": "cancelled_late" if is_late else "cancelled_early",
             "is_late": is_late,
             "ts": datetime.utcnow().isoformat(),
         }
@@ -446,6 +479,9 @@ def reschedule_single_class(student_id: str, old_iso: str, new_iso: str) -> bool
         {
             "type": "class_rescheduled",
             "student_id": student_id,
+            "at": new_iso,
+            "date": new_iso,
+            "status": "rescheduled",
             "from": old_iso,
             "to": new_iso,
             "ts": datetime.utcnow().isoformat(),

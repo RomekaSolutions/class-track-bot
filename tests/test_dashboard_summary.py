@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import types
@@ -75,6 +76,29 @@ _pytz.NonExistentTimeError = Exception
 sys.modules["pytz"] = _pytz
 
 import class_track_bot as ctb
+import data_store
+
+
+def _setup(monkeypatch, tmp_path, class_dates):
+    students = {
+        "1": {
+            "name": "Test Student",
+            "telegram_id": 1,
+            "class_dates": class_dates,
+            "classes_remaining": 1,
+            "cancelled_dates": [],
+            "schedule_pattern": "",
+            "class_duration_hours": 1.0,
+        }
+    }
+    students_file = tmp_path / "students.json"
+    logs_file = tmp_path / "logs.json"
+    students_file.write_text(json.dumps(students))
+    logs_file.write_text("[]")
+    for module in (ctb, data_store):
+        monkeypatch.setattr(module, "STUDENTS_FILE", str(students_file))
+        monkeypatch.setattr(module, "LOGS_FILE", str(logs_file))
+    return students_file, logs_file
 
 
 def test_dashboard_ignores_logs_without_date(monkeypatch, capsys):
@@ -87,6 +111,22 @@ def test_dashboard_ignores_logs_without_date(monkeypatch, capsys):
     monkeypatch.setattr(ctb, "load_logs", lambda: logs)
     summary = ctb.generate_dashboard_summary()
     captured = capsys.readouterr()
-    assert "Skipping malformed log entry (no date)" in captured.out
+    assert "Skipping malformed log entry (no date/at)" in captured.out
     assert "Completed: 1" in summary
-    assert "Note: 1 logs were ignored due to missing date." in summary
+    assert "Note: 1 logs were ignored due to missing date/at." in summary
+
+
+def test_dual_field_logging_and_counting(tmp_path, monkeypatch):
+    iso_dt = datetime.now().replace(microsecond=0).isoformat()
+    _, logs_file = _setup(monkeypatch, tmp_path, [iso_dt])
+
+    data_store.mark_class_completed("1", iso_dt)
+
+    logs = json.loads(logs_file.read_text())
+    last_entry = logs[-1]
+    assert "at" in last_entry
+    assert "date" in last_entry
+    assert last_entry["at"] == last_entry["date"]
+
+    summary = ctb.generate_dashboard_summary()
+    assert "Completed: 1" in summary
