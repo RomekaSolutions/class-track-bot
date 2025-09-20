@@ -2073,7 +2073,7 @@ def generate_dashboard_summary() -> str:
     )
     lines.append(f"Total scheduled hours/week: {total_hours:.1f}")
     lines.append("")
-    lines.append(f"Today's classes ({fmt_bkk(today)}):")
+    lines.append(f"Unlogged classes (today) ({fmt_bkk(today)}):")
     if today_classes:
         lines.extend(f"- {item}" for item in today_classes)
     else:
