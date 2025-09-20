@@ -818,8 +818,18 @@ def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List
         results.append(dt)
     results.sort()
 
+    try:
+        requested_count = int(count)
+    except (TypeError, ValueError):
+        requested_count = 0
+    if requested_count < 0:
+        requested_count = 0
+
+    if requested_count == 0:
+        return []
+
     if is_premium(student):
-        visible_cap = count
+        visible_cap = requested_count
     else:
         remaining_raw = student.get("classes_remaining")
         try:
@@ -828,9 +838,32 @@ def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List
             remaining = 0
         if remaining < 0:
             remaining = 0
-        visible_cap = min(count, remaining)
+        visible_cap = min(requested_count, remaining)
 
     return results[:visible_cap]
+
+
+def get_student_cancellable_classes(student: Dict[str, Any]) -> List[datetime]:
+    """Return all upcoming classes that a student can cancel."""
+
+    now = ensure_bangkok(datetime.now())
+    cancelled = set(student.get("cancelled_dates", []))
+    results: List[datetime] = []
+    for item in student.get("class_dates", []):
+        try:
+            dt = ensure_bangkok(item)
+        except Exception:
+            try:
+                dt = ensure_bangkok(datetime.strptime(item, "%Y-%m-%d %H:%M"))
+            except Exception:
+                continue
+        if dt <= now:
+            continue
+        if item in cancelled or dt.isoformat() in cancelled:
+            continue
+        results.append(dt)
+    results.sort()
+    return results
 
 
 def get_admin_visible_classes(
@@ -4368,7 +4401,7 @@ async def handle_cancel_dismiss(query, student_key: str, student: Dict[str, Any]
 
 async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
     """Begin the cancellation process.  Show a list of upcoming classes."""
-    upcoming_list = get_student_visible_classes(student, count=5)
+    upcoming_list = get_student_cancellable_classes(student)
     if not upcoming_list:
         await safe_edit_or_send(query, "You have no classes to cancel.")
         return
@@ -4410,7 +4443,7 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     except ValueError:
         await safe_edit_or_send(query, "Invalid selection.")
         return
-    upcoming = get_student_visible_classes(student, count=5)
+    upcoming = get_student_cancellable_classes(student)
     if idx >= len(upcoming):
         await safe_edit_or_send(query, "Invalid class selected.")
         return
