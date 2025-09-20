@@ -1999,14 +1999,18 @@ def generate_dashboard_summary() -> str:
     skipped_logs = 0
 
     for entry in logs:
-        if "date" not in entry:
-            print(f"⚠️ Skipping malformed log entry (no date): {entry}")
+        date_value = entry.get("date") or entry.get("at")
+        if not date_value:
+            print(f"⚠️ Skipping malformed log entry (no date/at): {entry}")
             skipped_logs += 1
             continue
-        entry_date = parse_log_date(entry["date"])
+        entry_date = parse_log_date(str(date_value))
         if entry_date < month_start:
             continue
-        status = entry.get("status", "")
+        raw_status = (entry.get("status") or entry.get("type") or "")
+        status = str(raw_status).lower()
+        if status.startswith("class_"):
+            status = status[6:]
         if status == "completed":
             completed += 1
         elif status.startswith("missed"):
@@ -2123,7 +2127,9 @@ def generate_dashboard_summary() -> str:
 
     if skipped_logs:
         lines.append("")
-        lines.append(f"Note: {skipped_logs} logs were ignored due to missing date.")
+        lines.append(
+            f"Note: {skipped_logs} logs were ignored due to missing date/at."
+        )
 
     return "\n".join(lines)
 
@@ -3006,11 +3012,18 @@ async def download_month_command(update: Update, context: ContextTypes.DEFAULT_T
     next_month = month_start.replace(day=28) + timedelta(days=4)
     month_end = next_month - timedelta(days=next_month.day)
     logs = load_logs()
-    month_logs = [
-        entry
-        for entry in logs
-        if month_start <= parse_log_date(entry["date"]) <= month_end
-    ]
+    month_logs: List[Dict[str, Any]] = []
+    for entry in logs:
+        date_value = entry.get("date") or entry.get("at")
+        if not date_value:
+            continue
+        try:
+            entry_date = parse_log_date(str(date_value))
+        except Exception:
+            logging.warning("Skipping log with invalid date for export: %s", entry)
+            continue
+        if month_start <= entry_date <= month_end:
+            month_logs.append(entry)
     filename = f"class_logs_{month_start.strftime('%Y_%m')}.json"
     try:
         with open(filename, "w", encoding="utf-8") as f:
@@ -3612,6 +3625,21 @@ async def fixlogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 @admin_only
+async def migrate_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run schema migration ensuring all logs contain a ``date`` field."""
+
+    try:
+        migrated = data_store.migrate_log_schemas()
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Migration failed: {exc}")
+        return
+
+    await update.message.reply_text(
+        f"✅ Migration complete: {migrated} log entries updated."
+    )
+
+
+@admin_only
 async def nukepending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args or context.args[0].lower() != "confirm":
         await update.message.reply_text("Usage: /nukepending confirm")
@@ -4006,7 +4034,7 @@ def build_student_classes_text(
                         entry,
                     )
                     continue
-                dt_str = entry.get("date", "")
+                dt_str = entry.get("date") or entry.get("at", "")
                 try:
                     parsed_dt = ensure_bangkok(dt_str)
                 except Exception:
@@ -4032,7 +4060,10 @@ def build_student_classes_text(
         if recent_logs:
             for entry in recent_logs:
                 try:
-                    status = (entry.get("status") or "").lower()
+                    raw_status = (entry.get("status") or entry.get("type") or "")
+                    status = str(raw_status).lower()
+                    if status.startswith("class_"):
+                        status = status[6:]
                     if status == "completed":
                         symbol = "✅"
                     elif status.startswith("missed") or status.startswith("cancelled") or status.startswith(
@@ -4042,7 +4073,12 @@ def build_student_classes_text(
                     else:
                         symbol = "•"
                     dt = entry.get("_parsed_dt")
-                    dt_txt = fmt_bkk(dt, add_label=False) if isinstance(dt, datetime) else entry.get("date", "")
+                    dt_txt = (
+                        fmt_bkk(dt, add_label=False)
+                        if isinstance(dt, datetime)
+                        else entry.get("date")
+                        or entry.get("at", "")
+                    )
                     note = entry.get("note") or ""
                     if note:
                         lines.append(f"{symbol} {dt_txt} – {note}")
@@ -4690,11 +4726,18 @@ async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     next_month = month_start.replace(day=28) + timedelta(days=4)
     month_end = next_month - timedelta(days=next_month.day)
     # Filter logs for the month
-    month_logs = [
-        entry
-        for entry in logs
-        if month_start <= parse_log_date(entry["date"]) <= month_end
-    ]
+    month_logs: List[Dict[str, Any]] = []
+    for entry in logs:
+        date_value = entry.get("date") or entry.get("at")
+        if not date_value:
+            continue
+        try:
+            entry_date = parse_log_date(str(date_value))
+        except Exception:
+            logging.warning("Skipping log with invalid date for export: %s", entry)
+            continue
+        if month_start <= entry_date <= month_end:
+            month_logs.append(entry)
     # Dump to JSON string
     month_data = json.dumps(month_logs, indent=2, ensure_ascii=False)
     # Send as file to each admin
@@ -4842,6 +4885,7 @@ def main() -> None:
     application.add_handler(CommandHandler("resolveids", resolveids_command))
     application.add_handler(CommandHandler("checklogs", checklogs_command))
     application.add_handler(CommandHandler("fixlogs", fixlogs_command))
+    application.add_handler(CommandHandler("migratelogs", migrate_logs_command))
     application.add_handler(CommandHandler("nukepending", nukepending_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
