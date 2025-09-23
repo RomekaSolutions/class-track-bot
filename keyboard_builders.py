@@ -1,12 +1,21 @@
 from typing import Dict, Any, Tuple
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+try:  # pragma: no cover - circular import guard during module init
+    from class_track_bot import fmt_bkk
+except ImportError:  # pragma: no cover
+    def fmt_bkk(dt, add_label: bool = False):
+        from class_track_bot import fmt_bkk as _fmt_bkk
+
+        return _fmt_bkk(dt, add_label=add_label)
+
 
 def build_student_submenu(student_id: str) -> InlineKeyboardMarkup:
     """Return the admin submenu for a student.
 
     Callback data strings follow the ``stu:<ACTION>:<id>`` convention.
     """
+    student_id = str(student_id)
     buttons = [
         [
             InlineKeyboardButton("✅ Log Class", callback_data=f"stu:LOG:{student_id}"),
@@ -39,6 +48,8 @@ def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple
     """Return a detailed summary for ``student`` and the admin submenu."""
 
     name = student.get("name", student_id)
+    if student.get("needs_id") and student.get("telegram_mode", True):
+        name += " (needs ID)"
     remaining = student.get("classes_remaining", 0)
 
     # Upcoming class dates – show at most the next three entries
@@ -52,11 +63,21 @@ def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple
     if upcoming:
         lines.append("Upcoming classes:")
         for dt in upcoming:
-            lines.append(f" - {dt}")
+            lines.append(f" - {fmt_bkk(dt)}")
     else:
         lines.append("No upcoming classes")
 
     lines.append(f"Paused: {'Yes' if paused else 'No'}")
 
     text = "\n".join(lines)
-    return text, build_student_submenu(student_id)
+    submenu = build_student_submenu(student_id)
+    keyboard = [row[:] for row in submenu.inline_keyboard]
+    if student.get("telegram_mode") is False:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📱 Connect to Telegram", callback_data=f"stu:CONNECT:{student_id}"
+                )
+            ]
+        )
+    return text, InlineKeyboardMarkup(keyboard)

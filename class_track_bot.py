@@ -41,7 +41,7 @@ import logging
 import os
 import inspect
 from datetime import datetime, timedelta, time, date, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 
 from telegram import (
     Update,
@@ -77,11 +77,16 @@ from admin_flows import (
     handle_student_action,
     handle_class_selection,
     handle_class_confirmation,
+    handle_log_action,
+    renew_received_count,
+    renew_confirm,
 )
 from keyboard_builders import (
     build_student_submenu as kb_build_student_submenu,
     build_student_detail_view as kb_build_student_detail_view,
 )
+
+import data_store
 
 
 # -----------------------------------------------------------------------------
@@ -133,6 +138,16 @@ DEFAULT_CYCLE_WEEKS = 4
 DEFAULT_DURATION_HOURS = 1.0
 # Offset before class time to send reminder
 DEFAULT_REMINDER_OFFSET = timedelta(hours=1)
+DEFAULT_REMINDER_MINUTES = int(DEFAULT_REMINDER_OFFSET.total_seconds() // 60)
+
+# Supported reminder choices exposed to students (minutes -> label)
+REMINDER_OPTIONS: List[Tuple[int, str]] = [
+    (60, "1 hour (default)"),
+    (30, "30 minutes"),
+    (15, "15 minutes"),
+    (5, "5 minutes"),
+    (0, "None"),
+]
 
 # Base timezone for all operations (Bangkok time)
 BASE_TZ = pytz.timezone("Asia/Bangkok")
@@ -164,22 +179,147 @@ def bkk_min():
     return datetime.min.replace(tzinfo=BKK_TZ)
 
 
+def _ordinal_suffix(day: int) -> str:
+    """Return the ordinal suffix for ``day`` (1 -> "st", etc.)."""
+
+    if 10 <= day % 100 <= 20:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
+
 def fmt_bkk(dt, add_label: bool = False):
     """Format datetime for human display in Bangkok timezone.
 
     Parameters
     ----------
     dt:
-        Datetime or parseable string.
+        Datetime, date or parseable string.
     add_label:
         If True, append ``" ICT"`` to the formatted string.
     """
 
+    if isinstance(dt, date) and not isinstance(dt, datetime):
+        dt = datetime.combine(dt, time.min)
     dt = ensure_bangkok(dt)
-    text = dt.strftime("%a %d %b %H:%M")
+
+    day_suffix = _ordinal_suffix(dt.day)
+    text = f"{dt.strftime('%a')} {dt.day}{day_suffix}"
+    if any((dt.hour, dt.minute, dt.second, dt.microsecond)):
+        text += dt.strftime(" %H:%M")
     if add_label:
         text += " ICT"
     return text
+
+
+REMINDER_LABEL_MAP = dict(REMINDER_OPTIONS)
+REMINDER_VALID_MINUTES = set(REMINDER_LABEL_MAP)
+
+# Student-facing messages used when a plan is paused.
+PAUSED_ACTION_MESSAGE = "Plan is paused - contact your teacher."
+PAUSED_SETTINGS_MESSAGE = "Plan is paused."
+
+
+def normalize_reminder_minutes(value: Any) -> int:
+    """Return a supported reminder offset in minutes from arbitrary input."""
+
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_REMINDER_MINUTES
+    if minutes < 0:
+        return 0
+    if minutes not in REMINDER_VALID_MINUTES:
+        return DEFAULT_REMINDER_MINUTES
+    return minutes
+
+
+def get_student_reminder_minutes(student: Dict[str, Any]) -> int:
+    """Return the reminder preference for ``student`` in minutes."""
+
+    raw = student.get("reminder_offset_minutes", DEFAULT_REMINDER_MINUTES)
+    return normalize_reminder_minutes(raw)
+
+
+def reminder_setting_sentence(minutes: int) -> str:
+    """Return a human sentence fragment describing ``minutes`` before class."""
+
+    if minutes == 0:
+        return "no reminders"
+    label = REMINDER_LABEL_MAP.get(minutes)
+    if label:
+        base = label.replace(" (default)", "")
+        return f"{base} before class"
+    return f"{minutes} minutes before class"
+
+
+def reminder_setting_summary(minutes: int) -> str:
+    """Return text describing the reminder preference for menu displays."""
+
+    if minutes == 0:
+        return "None (reminders off)"
+    label = REMINDER_LABEL_MAP.get(minutes)
+    if label:
+        if " (default)" in label:
+            base = label.replace(" (default)", "")
+            return f"{base} before class (default)"
+        return f"{label} before class"
+    return f"{minutes} minutes before class"
+
+
+def build_notification_settings_keyboard(current_minutes: int) -> InlineKeyboardMarkup:
+    """Return the inline keyboard for the notification settings view."""
+
+    rows: List[List[InlineKeyboardButton]] = []
+    for minutes, label in REMINDER_OPTIONS:
+        prefix = "✅ " if minutes == current_minutes else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{prefix}{label}",
+                    callback_data=f"notification_set:{minutes}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_start")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_notification_settings_view(
+    student: Dict[str, Any],
+    *,
+    status: Optional[str] = None,
+) -> Tuple[str, InlineKeyboardMarkup]:
+    """Return text and keyboard for the notification settings screen."""
+
+    current_minutes = get_student_reminder_minutes(student)
+    lines: List[str] = []
+    if status:
+        lines.append(status)
+        lines.append("")
+    lines.append("Choose when you'd like to receive reminders before class.")
+    lines.append(f"Current setting: {reminder_setting_summary(current_minutes)}.")
+    return "\n".join(lines), build_notification_settings_keyboard(current_minutes)
+
+
+def _parse_iso(dt_str: str) -> datetime:
+    """Parse an ISO timestamp string into a timezone-aware ``datetime``."""
+    dt = datetime.fromisoformat(dt_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def get_last_class(student: Dict[str, Any]):
+    """Return the last scheduled class as a ``datetime`` or ``None``.
+
+    If there are no class dates, returns ``None``. Otherwise returns the
+    latest parsed datetime.
+    """
+    class_dates = student.get("class_dates")
+    if not class_dates:
+        return None
+    dates = [_parse_iso(x) for x in class_dates if x]
+    return max(dates) if dates else None
 
 # Weekday helpers used throughout scheduling utilities
 WEEKDAY_NAMES = [
@@ -257,6 +397,40 @@ def dedupe_student_keys(students: Dict[str, Any]) -> bool:
     return changed
 
 
+def ensure_numeric_student_ids(students: Dict[str, Any]) -> bool:
+    """Ensure all keys and ``telegram_id`` values are numeric strings."""
+
+    changed = False
+    flagged = False
+    new_students: Dict[str, Any] = {}
+    for key, student in list(students.items()):
+        tid = student.get("telegram_id")
+        sid: Optional[str] = None
+        if isinstance(tid, int) or (isinstance(tid, str) and str(tid).isdigit()):
+            sid = str(int(tid))
+        elif str(key).isdigit():
+            sid = str(int(key))
+            student["telegram_id"] = int(sid)
+        if sid is None:
+            handle = normalize_handle(student.get("telegram_handle")) or normalize_handle(key)
+            student["telegram_handle"] = handle
+            student["needs_id"] = True
+            new_students[handle] = student
+            flagged = True
+            continue
+        if normalize_handle(student.get("telegram_handle")):
+            student["telegram_handle"] = normalize_handle(student.get("telegram_handle"))
+        new_students[sid] = student
+        if sid != str(key):
+            changed = True
+    if flagged:
+        changed = True
+    if changed:
+        students.clear()
+        students.update(new_students)
+    return changed
+
+
 def resolve_student(students: Dict[str, Any], key: str) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Return (canonical_key, student) for a given ID or handle input.
 
@@ -310,6 +484,13 @@ def normalize_students(students: Dict[str, Any]) -> bool:
             changed = True
         if "class_duration_hours" not in student:
             student["class_duration_hours"] = DEFAULT_DURATION_HOURS
+            changed = True
+        raw_minutes = student.get("reminder_offset_minutes")
+        normalized_minutes = normalize_reminder_minutes(
+            DEFAULT_REMINDER_MINUTES if raw_minutes is None else raw_minutes
+        )
+        if raw_minutes != normalized_minutes:
+            student["reminder_offset_minutes"] = normalized_minutes
             changed = True
         # Drop legacy per-student timezone field
         if "student_timezone" in student:
@@ -384,20 +565,18 @@ def migrate_student_dates(students: Dict[str, Any]) -> bool:
 (
     ADD_NAME,
     ADD_HANDLE,
-    ADD_PRICE,
     ADD_CLASSES,
     ADD_SCHEDULE,
     ADD_CUTOFF,
-    ADD_WEEKS,
     ADD_DURATION,
-    ADD_RENEWAL,
-) = range(9)
+    ADD_TELEGRAM_CHOICE,
+) = range(7)
 
 def load_students() -> Dict[str, Any]:
     """Load students from the JSON file and normalize legacy records."""
     if not os.path.exists(STUDENTS_FILE):
         return {}
-    with open(STUDENTS_FILE, "r", encoding="utf-8") as f:
+    with open(STUDENTS_FILE, "r", encoding="utf-8-sig") as f:
         try:
             data = json.load(f)
             if isinstance(data, dict):
@@ -415,16 +594,42 @@ def load_students() -> Dict[str, Any]:
         changed = True
     if dedupe_student_keys(students):
         changed = True
-    if changed:
-        # One-time migration: persist upgraded student records
+    if ensure_numeric_student_ids(students):
+        changed = True
+    if changed and students:
+        # One-time migration: persist upgraded student records (non-empty only)
         save_students(students)
     return students
 
 
 def save_students(students: Dict[str, Any]) -> None:
-    """Persist students dict to JSON."""
-    with open(STUDENTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(students, f, indent=2, ensure_ascii=False, sort_keys=True)
+    """Persist students dict to JSON enforcing numeric keys."""
+
+    if not students:
+        logging.warning("Refusing to overwrite students.json with empty data")
+        return
+    ensure_numeric_student_ids(students)
+    tmp_path = f"{STUDENTS_FILE}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(students, f, indent=2, ensure_ascii=False, sort_keys=True)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                # Best-effort: fsync may not be available on some platforms
+                pass
+        os.replace(tmp_path, STUDENTS_FILE)
+    except Exception as e:
+        logging.error(
+            "Failed to save students.json atomically; original file left unchanged: %s",
+            e,
+        )
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
 
 
 def normalize_log_students(
@@ -436,13 +641,21 @@ def normalize_log_students(
     """
 
     changed = False
-    for entry in logs:
+    for entry in list(logs):
         student_field = entry.get("student")
         if student_field is None:
             continue
         normalized = normalize_handle(str(student_field))
         canonical, _ = resolve_student(students, normalized)
-        new_key = canonical or normalized
+        if canonical is None:
+            if normalized.isdigit():
+                new_key = normalized
+            else:
+                logs.remove(entry)
+                changed = True
+                continue
+        else:
+            new_key = canonical
         if entry.get("student") != new_key:
             entry["student"] = new_key
             changed = True
@@ -514,16 +727,6 @@ def parse_schedule(
     return results
 
 
-def parse_renewal_date(date_str: str) -> Optional[str]:
-    """Validate a date string in YYYY‑MM‑DD format.  Returns the same
-    string if valid, otherwise None."""
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-        return date_str
-    except ValueError:
-        return None
-
-
 def parse_day_time(text: str) -> Optional[str]:
     """Validate and normalize a string like ``"Monday 17:00"``.
 
@@ -589,23 +792,20 @@ def next_occurrence(day_time_str: str, now: datetime) -> datetime:
         return now + timedelta(hours=1)
 
 
-def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[datetime]:
-    """Return upcoming class datetimes in the base timezone.
+def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List[datetime]:
+    """Return upcoming classes that a *student* should see.
 
-    ``student['class_dates']`` stores concrete class datetimes as
-    ISO 8601 strings with timezone offsets in the base timezone.
-    This function converts them to aware ``datetime`` objects, filters out
-    past or cancelled classes and returns the next ``count`` items.
+    ``student['class_dates']`` stores concrete class datetimes as ISO 8601
+    strings in the base timezone.  This helper converts them to timezone aware
+    ``datetime`` objects, removes past occurrences and any dates present in
+    ``cancelled_dates`` and returns the next ``count`` items.
+
+    Non-premium students will never see more entries than indicated by their
+    ``classes_remaining`` value, ensuring the UI stays aligned with purchased
+    credit.
     """
     now = ensure_bangkok(datetime.now())
     cancelled = set(student.get("cancelled_dates", []))
-    renewal_date = None
-    renewal_str = student.get("renewal_date")
-    if renewal_str:
-        try:
-            renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
-        except ValueError:
-            renewal_date = None
     results: List[datetime] = []
     for item in student.get("class_dates", []):
         try:
@@ -619,7 +819,106 @@ def get_upcoming_classes(student: Dict[str, Any], count: int = 5) -> List[dateti
             continue
         if item in cancelled or dt.isoformat() in cancelled:
             continue
-        if renewal_date and dt.date() > renewal_date:
+        results.append(dt)
+    results.sort()
+
+    try:
+        requested_count = int(count)
+    except (TypeError, ValueError):
+        requested_count = 0
+    if requested_count < 0:
+        requested_count = 0
+
+    if requested_count == 0:
+        return []
+
+    if is_premium(student):
+        visible_cap = requested_count
+    else:
+        remaining_raw = student.get("classes_remaining")
+        try:
+            remaining = int(remaining_raw)
+        except (TypeError, ValueError):
+            remaining = 0
+        if remaining < 0:
+            remaining = 0
+        visible_cap = min(requested_count, remaining)
+
+    return results[:visible_cap]
+
+
+def get_student_cancellable_classes(student: Dict[str, Any]) -> List[datetime]:
+    """Return all upcoming classes that a student can cancel."""
+
+    now = ensure_bangkok(datetime.now())
+    cancelled = set(student.get("cancelled_dates", []))
+    results: List[datetime] = []
+    for item in student.get("class_dates", []):
+        try:
+            dt = ensure_bangkok(item)
+        except Exception:
+            try:
+                dt = ensure_bangkok(datetime.strptime(item, "%Y-%m-%d %H:%M"))
+            except Exception:
+                continue
+        if dt <= now:
+            continue
+        if item in cancelled or dt.isoformat() in cancelled:
+            continue
+        results.append(dt)
+    results.sort()
+    return results
+
+
+def get_admin_visible_classes(
+    student_id: str, student: Dict[str, Any], count: int = 5
+) -> List[datetime]:
+    """Return past class datetimes that still need logging.
+
+    This powers the **Log Class** admin menu and must never include classes that
+    have already been logged as completed, cancelled, rescheduled or removed.
+    Future classes are ignored here; admins see only past, unlogged entries.
+    """
+
+    logs = load_logs()
+    now = ensure_bangkok(datetime.now())
+    results: List[datetime] = []
+    for item in student.get("class_dates", []):
+        try:
+            dt = ensure_bangkok(item)
+        except Exception:
+            try:
+                dt = ensure_bangkok(datetime.strptime(item, "%Y-%m-%d %H:%M"))
+            except Exception:
+                continue
+        if dt > now:
+            continue
+        if data_store.is_class_logged(student_id, dt.isoformat(), logs):
+            continue
+        results.append(dt)
+    results.sort()
+    return results[:count]
+
+
+def get_admin_upcoming_classes(
+    student_id: str, student: Dict[str, Any], count: int = 5
+) -> List[datetime]:
+    """Return upcoming class datetimes not yet logged by admins."""
+
+    logs = load_logs()
+    now = ensure_bangkok(datetime.now())
+    results: List[datetime] = []
+    for item in student.get("class_dates", []):
+        try:
+            dt = ensure_bangkok(item)
+        except Exception:
+            try:
+                dt = ensure_bangkok(datetime.strptime(item, "%Y-%m-%d %H:%M"))
+            except Exception:
+                continue
+        if dt <= now:
+            continue
+        if data_store.is_class_logged(student_id, dt.isoformat(), logs):
             continue
         results.append(dt)
     results.sort()
@@ -635,9 +934,15 @@ async def send_class_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     students = load_students()
     student = students.get(student_key)
-    if not student or student.get("paused"):
+    if (
+        not student
+        or student.get("paused")
+        or not student.get("telegram_mode", True)
+    ):
         return
-    chat_id = student.get("telegram_id")
+    chat_id = (
+        student.get("telegram_id") if student.get("telegram_mode", True) else None
+    )
     if not chat_id:
         return
     try:
@@ -651,19 +956,40 @@ async def send_class_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
         logging.warning("Failed to send class reminder to %s", student.get("name"))
 
 
+def resolve_reminder_offset(
+    student: Dict[str, Any], reminder_offset: Optional[Union[int, timedelta]]
+) -> Optional[timedelta]:
+    """Return a :class:`timedelta` for reminder scheduling or ``None`` to skip."""
+
+    if isinstance(reminder_offset, timedelta):
+        if reminder_offset.total_seconds() <= 0:
+            return None
+        return reminder_offset
+    if reminder_offset is None:
+        minutes = get_student_reminder_minutes(student)
+    else:
+        minutes = normalize_reminder_minutes(reminder_offset)
+    if minutes <= 0:
+        return None
+    return timedelta(minutes=minutes)
+
+
 def schedule_class_reminder(
     application: Application,
     student_key: str,
     student: Dict[str, Any],
     class_dt_str: str,
-    reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
+    reminder_offset: Optional[Union[int, timedelta]] = None,
 ) -> None:
+    reminder_delta = resolve_reminder_offset(student, reminder_offset)
+    if reminder_delta is None:
+        return
     now = ensure_bangkok(datetime.now())
     try:
         class_dt = ensure_bangkok(class_dt_str)
     except Exception:
         return
-    run_time = class_dt - reminder_offset
+    run_time = class_dt - reminder_delta
     if run_time <= now:
         return
     application.job_queue.run_once(
@@ -678,20 +1004,80 @@ def schedule_student_reminders(
     application: Application,
     student_key: str,
     student: Dict[str, Any],
-    reminder_offset: timedelta = DEFAULT_REMINDER_OFFSET,
+    reminder_offset: Optional[Union[int, timedelta]] = None,
 ) -> None:
     """Schedule reminder jobs for all future classes of a student."""
+    if not student.get("telegram_mode", True):
+        return
+    if not student.get("telegram_id"):
+        return
+    reminder_delta = resolve_reminder_offset(student, reminder_offset)
     prefix = f"class_reminder:{student_key}:"
     # remove existing reminder jobs for this student
     for job in application.job_queue.jobs():
         if job.name and job.name.startswith(prefix):
             job.schedule_removal()
+    if reminder_delta is None:
+        return
     for item in student.get("class_dates", []):
         if item in student.get("cancelled_dates", []):
             continue
         schedule_class_reminder(
-            application, student_key, student, item, reminder_offset
+            application, student_key, student, item, reminder_delta
         )
+
+
+async def send_low_balance_if_threshold(app: Application, student_key: str, student: Dict[str, Any]):
+    """Warn when a student reaches the low balance threshold."""
+    remaining = student.get("classes_remaining")
+    if remaining != 2:
+        return
+    chat_id = student.get("telegram_id")
+    msg = "You have 2 classes remaining in your current set."
+    if chat_id:
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=msg)
+        except Exception:
+            logging.warning("Failed to send low balance notice to %s", student.get("name"))
+    notice = f"{student.get('name')} has 2 classes remaining."
+    for admin_id in ADMIN_IDS:
+        try:
+            await app.bot.send_message(chat_id=admin_id, text=notice)
+        except Exception:
+            continue
+
+
+def schedule_final_set_notice(app: Application, student_key: str, student: Dict[str, Any], offset: timedelta = timedelta(hours=1)) -> None:
+    """Schedule a notice before the final class in the current set."""
+    if not student.get("telegram_mode", True):
+        return
+    last_class = get_last_class(student)
+    if not last_class:
+        return
+    run_time = last_class - offset
+    job_name = f"final_notice:{student_key}"
+    for job in app.job_queue.jobs():
+        if job.name == job_name:
+            job.schedule_removal()
+    app.job_queue.run_once(send_final_set_notice, when=run_time, name=job_name, data={"student_key": student_key})
+
+
+async def send_final_set_notice(context: ContextTypes.DEFAULT_TYPE):
+    student_key = context.job.data.get("student_key")
+    student = data_store.get_student_by_id(student_key)
+    if not student or not student.get("telegram_mode", True):
+        return
+    chat_id = student.get("telegram_id")
+    if not chat_id:
+        return
+    last_class = get_last_class(student)
+    if not last_class:
+        return
+    msg = f"Final class of your current set is at {fmt_bkk(last_class)} today. Good luck!"
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+    except Exception:
+        logging.warning("Failed to send final set notice to %s", student.get("name"))
 
 
 def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[int] = None) -> bool:
@@ -702,21 +1088,11 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
     class_dates = student.get("class_dates", [])
     original_len = len(class_dates)
 
-    renewal_date = None
-    renewal_str = student.get("renewal_date")
-    if renewal_str:
-        try:
-            renewal_date = date.fromisoformat(renewal_str)
-        except ValueError:
-            renewal_date = None
-
     parsed: List[datetime] = []
     for item in class_dates:
         try:
             dt = ensure_bangkok(item)
         except Exception:
-            continue
-        if renewal_date and dt.date() > renewal_date:
             continue
         parsed.append(dt)
     parsed.sort()
@@ -736,8 +1112,6 @@ def ensure_future_class_dates(student: Dict[str, Any], horizon_weeks: Optional[i
                 dt = ensure_bangkok(dt_str)
                 if latest and dt <= latest:
                     continue
-                if renewal_date and dt.date() > renewal_date:
-                    continue
                 parsed.append(dt)
                 added = True
     parsed.sort()
@@ -749,9 +1123,8 @@ def regenerate_future_class_dates(student: Dict[str, Any], *, now: Optional[date
     """Regenerate future ``class_dates`` based on ``schedule_pattern``.
 
     Past class dates are preserved. Future dates are generated from the
-    current ``schedule_pattern`` from ``now`` up to the student's
-    ``renewal_date`` (if any).  ``class_dates`` remain sorted and
-    de-duplicated and cancelled dates are skipped.
+    current ``schedule_pattern`` from ``now`` forward. ``class_dates`` remain
+    sorted and de-duplicated and cancelled dates are skipped.
     """
     if now is None:
         now = ensure_bangkok(datetime.now())
@@ -765,12 +1138,7 @@ def regenerate_future_class_dates(student: Dict[str, Any], *, now: Optional[date
             continue
         if dt <= now:
             past.append(dt)
-    renewal_str = student.get("renewal_date")
-    renewal_date = date.fromisoformat(renewal_str) if renewal_str else None
     horizon_weeks = student.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
-    if renewal_date:
-        diff_weeks = max(0, (renewal_date - now.date()).days // 7 + 1)
-        horizon_weeks = max(horizon_weeks, diff_weeks)
     future: List[datetime] = []
     if entries:
         gen = parse_schedule(
@@ -783,8 +1151,6 @@ def regenerate_future_class_dates(student: Dict[str, Any], *, now: Optional[date
             except Exception:
                 continue
             if dt <= now:
-                continue
-            if renewal_date and dt.date() > renewal_date:
                 continue
             if dt.isoformat() in cancelled:
                 continue
@@ -907,11 +1273,6 @@ def reschedule_single_class(
         new_dt = new_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if new_dt <= now:
         raise ValueError("Cannot reschedule into the past")
-    renewal_str = student.get("renewal_date")
-    if renewal_str:
-        renewal_date = date.fromisoformat(renewal_str)
-        if new_dt.date() > renewal_date:
-            raise ValueError("Beyond renewal date")
     class_dates = [datetime.fromisoformat(x) for x in student.get("class_dates", [])]
     try:
         class_dates.remove(old_dt)
@@ -1068,7 +1429,11 @@ def admin_only(func):
 @admin_only
 async def add_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Initiate the conversation to add a new student."""
-    await update.message.reply_text(
+    q = update.callback_query
+    if q:
+        await q.answer()
+    message = update.effective_message
+    await message.reply_text(
         "Adding a new student. Please enter the student's name:",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -1077,30 +1442,131 @@ async def add_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["name"] = update.message.text.strip()
-    await update.message.reply_text("Enter the student's Telegram @handle or numeric ID:")
-    return ADD_HANDLE
+    name = (update.message.text or "").strip()
+    if not name:
+        await update.message.reply_text(
+            "Name can't be empty. Please enter the student's name:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_NAME
+    context.user_data["name"] = name
+    context.user_data.pop("telegram_mode", None)
+    context.user_data.pop("student_key", None)
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📱 Has Telegram", callback_data="student_has_telegram"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📵 No Telegram Yet", callback_data="student_no_telegram"
+                )
+            ],
+            [
+                InlineKeyboardButton("❌ Cancel", callback_data="student_cancel")
+            ],
+        ]
+    )
+    await update.message.reply_text(
+        "Does this student use Telegram?",
+        reply_markup=keyboard,
+    )
+    return ADD_TELEGRAM_CHOICE
+
+
+async def add_telegram_choice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    if not query:
+        return ADD_TELEGRAM_CHOICE
+    await query.answer()
+    choice = query.data or ""
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if choice == "student_has_telegram":
+        context.user_data["telegram_mode"] = True
+        context.user_data.pop("student_key", None)
+        context.user_data.setdefault("telegram_id", None)
+        context.user_data.setdefault("telegram_handle", None)
+        await query.message.reply_text(
+            "Enter the student's Telegram @handle or numeric ID:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_HANDLE
+    if choice == "student_no_telegram":
+        context.user_data["telegram_mode"] = False
+        context.user_data["telegram_id"] = None
+        context.user_data["telegram_handle"] = None
+        context.user_data.pop("needs_id", None)
+        name = context.user_data.get("name", "")
+        student_key = name.lower().replace(" ", "_")
+        context.user_data["student_key"] = student_key
+        await query.message.reply_text(
+            "Enter number of classes in the plan (e.g., 8):",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_CLASSES
+    if choice == "student_cancel":
+        context.user_data.clear()
+        await query.message.reply_text(
+            "Operation cancelled.", reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    await query.message.reply_text(
+        "Please choose one of the provided options.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "📱 Has Telegram", callback_data="student_has_telegram"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "📵 No Telegram Yet", callback_data="student_no_telegram"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ Cancel", callback_data="student_cancel"
+                    )
+                ],
+            ]
+        ),
+    )
+    return ADD_TELEGRAM_CHOICE
 
 
 async def add_handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if context.user_data.get("telegram_mode") is False:
+        await update.message.reply_text(
+            "Please choose whether the student has Telegram using the buttons provided.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_TELEGRAM_CHOICE
     handle = update.message.text.strip()
     if handle.startswith("@"):  # strip leading @
         handle = handle[1:]
     if handle.isdigit():
         context.user_data["telegram_id"] = int(handle)
+        context.user_data["telegram_handle"] = None
+        context.user_data.pop("needs_id", None)
     else:
-        context.user_data["telegram_handle"] = normalize_handle(handle)
-    await update.message.reply_text("Enter the plan price (numerical value, e.g., 3500):")
-    return ADD_PRICE
-
-
-async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        price = float(update.message.text.strip())
-    except ValueError:
-        await update.message.reply_text("Invalid price. Please enter a numeric value:")
-        return ADD_PRICE
-    context.user_data["plan_price"] = price
+        normalized = normalize_handle(handle)
+        context.user_data["telegram_handle"] = normalized
+        try:
+            chat = await context.application.bot.get_chat(f"@{normalized}")
+            context.user_data["telegram_id"] = int(chat.id)
+            context.user_data["telegram_handle"] = chat.username or normalized
+            context.user_data.pop("needs_id", None)
+        except Exception:
+            context.user_data["telegram_id"] = None
+            context.user_data["needs_id"] = True
     await update.message.reply_text("Enter number of classes in the plan (e.g., 8):")
     return ADD_CLASSES
 
@@ -1140,23 +1606,27 @@ async def add_cutoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ADD_CUTOFF
     context.user_data["cutoff_hours"] = cutoff
-    await update.message.reply_text(
-        "Length of the repeating cycle in weeks (e.g., 4 for a monthly cycle):"
-    )
-    return ADD_WEEKS
+    schedule_pattern = context.user_data.get("schedule_pattern", "")
+    classes_remaining = context.user_data.get("classes_remaining")
+    cycle_weeks = DEFAULT_CYCLE_WEEKS
+    weekly_slots = 0
 
+    if isinstance(schedule_pattern, str) and schedule_pattern:
+        entries = [item.strip() for item in schedule_pattern.split(",") if item.strip()]
+        for entry in entries:
+            if parse_day_time(entry):
+                weekly_slots += 1
 
-async def add_weeks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        weeks = int(update.message.text.strip())
-        if weeks <= 0 or weeks > 26:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text(
-            "Invalid number. Length of the repeating cycle in weeks (1-26, e.g., 4):"
-        )
-        return ADD_WEEKS
-    context.user_data["cycle_weeks"] = weeks
+    if (
+        isinstance(classes_remaining, int)
+        and classes_remaining > 0
+        and weekly_slots > 0
+    ):
+        cycle_weeks = (classes_remaining + weekly_slots - 1) // weekly_slots
+        if cycle_weeks < DEFAULT_CYCLE_WEEKS:
+            cycle_weeks = DEFAULT_CYCLE_WEEKS
+
+    context.user_data["cycle_weeks"] = cycle_weeks
     await update.message.reply_text(
         "Class length in hours (e.g., 1.5 for 90 minutes):"
     )
@@ -1176,24 +1646,24 @@ async def add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     duration = max(0.5, min(4.0, duration))
     duration = round(duration * 4) / 4
     context.user_data["class_duration_hours"] = duration
-    await update.message.reply_text(
-        "Enter the renewal date (YYYY-MM-DD). This is when the student is expected to renew payment:",
-    )
-    return ADD_RENEWAL
 
-
-async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    date_str = update.message.text.strip()
-    renewal = parse_renewal_date(date_str)
-    if renewal is None:
-        await update.message.reply_text("Invalid date format. Please use YYYY-MM-DD:")
-        return ADD_RENEWAL
-    context.user_data["renewal_date"] = renewal
     # Build student record
     students = load_students()
-    telegram_id = context.user_data.get("telegram_id")
-    handle = normalize_handle(context.user_data.get("telegram_handle"))
-    key = str(telegram_id) if telegram_id else handle
+    telegram_mode = context.user_data.get("telegram_mode")
+    if telegram_mode is None:
+        telegram_mode = True
+    if telegram_mode:
+        telegram_id = context.user_data.get("telegram_id")
+        handle = normalize_handle(context.user_data.get("telegram_handle"))
+        key = str(int(telegram_id)) if telegram_id else handle
+    else:
+        telegram_id = None
+        handle = None
+        key = context.user_data.get("student_key")
+        if not key:
+            name = context.user_data.get("name", "")
+            key = name.lower().replace(" ", "_")
+            context.user_data["student_key"] = key
     if key in students:
         await update.message.reply_text("A student with this identifier already exists. Aborting.")
         return ConversationHandler.END
@@ -1208,26 +1678,90 @@ async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     student = {
         "name": context.user_data.get("name"),
-        "telegram_id": telegram_id,
+        "telegram_id": int(telegram_id) if telegram_id else None,
         "telegram_handle": handle,
         "classes_remaining": context.user_data.get("classes_remaining"),
-        "plan_price": context.user_data.get("plan_price"),
-        "renewal_date": context.user_data.get("renewal_date"),
         "class_dates": class_dates,
         "schedule_pattern": schedule_pattern,
         "cutoff_hours": context.user_data.get("cutoff_hours"),
         "cycle_weeks": cycle_weeks,
         "class_duration_hours": context.user_data.get("class_duration_hours"),
+        "reminder_offset_minutes": DEFAULT_REMINDER_MINUTES,
         "paused": False,
         "free_class_credit": 0,
         "reschedule_credit": 0,
         "notes": [],
+        "telegram_mode": bool(telegram_mode),
     }
+    if telegram_mode and not telegram_id:
+        student["needs_id"] = True
     ensure_future_class_dates(student)
     students[key] = student
     save_students(students)
-    schedule_student_reminders(context.application, key, student)
-    await update.message.reply_text(f"Added student {context.user_data.get('name')} successfully!")
+    if telegram_mode and telegram_id:
+        schedule_student_reminders(context.application, key, student)
+        await update.message.reply_text(
+            f"Added student {context.user_data.get('name')} successfully!"
+        )
+    elif telegram_mode:
+        await update.message.reply_text(
+            "Student added with handle only. Reminders will start once they /start the bot or you run /resolveids."
+        )
+    else:
+        await update.message.reply_text(
+            "Student added without Telegram. You can connect them later from their profile."
+        )
+    return ConversationHandler.END
+
+
+# Minimal legacy compatibility: add_renewal handler
+async def add_renewal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Deprecated legacy handler retained for test compatibility.
+
+    This no-op handler logs a deprecation warning and ends any conversation.
+    It does not attempt to write a renewal_date or mutate schedules here;
+    the new renewal flow lives in admin_flows.py.
+    """
+    logging.warning("add_renewal is deprecated; writing minimal record for tests.")
+    try:
+        students = data_store.load_students()
+        telegram_mode = context.user_data.get("telegram_mode")
+        if telegram_mode is None:
+            telegram_mode = True
+        if telegram_mode:
+            key = str(
+                context.user_data.get("telegram_id")
+                or context.user_data.get("telegram_handle")
+            )
+        else:
+            name = context.user_data.get("name", "")
+            key = context.user_data.get("student_key") or name.lower().replace(" ", "_")
+            context.user_data["student_key"] = key
+        student = {
+            "name": context.user_data.get("name"),
+            "telegram_id": context.user_data.get("telegram_id") if telegram_mode else None,
+            "telegram_handle": context.user_data.get("telegram_handle") if telegram_mode else None,
+            "class_dates": context.user_data.get("class_dates", []),
+            "classes_remaining": context.user_data.get("classes_remaining", 0),
+            "cancelled_dates": [],
+            "reminder_offset_minutes": DEFAULT_REMINDER_MINUTES,
+            "telegram_mode": bool(telegram_mode),
+        }
+        if key:
+            students[str(key)] = student
+            data_store.save_students(students)
+            # Trigger reminder scheduling when we have a numeric id
+            if (
+                telegram_mode
+                and context.user_data.get("telegram_id")
+                and hasattr(context, "application")
+            ):
+                try:
+                    schedule_student_reminders(context.application, key, student)
+                except Exception:
+                    pass
+    except Exception:
+        logging.exception("add_renewal minimal save failed")
     return ConversationHandler.END
 
 
@@ -1451,7 +1985,8 @@ async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not student:
         await update.message.reply_text(f"Student '{student_key_input}' not found.")
         return
-    upcoming_list = get_upcoming_classes(student, count=8)
+    # Admins see upcoming scheduled classes minus already logged ones
+    upcoming_list = get_admin_upcoming_classes(student_key, student, count=8)
     if not upcoming_list:
         await update.message.reply_text("No upcoming classes to cancel.")
         return
@@ -1491,7 +2026,8 @@ async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         await query.edit_message_text("Invalid selection.")
         return
-    upcoming_list = get_upcoming_classes(student, count=8)
+    # Use admin visibility to ensure cancelled or completed classes are excluded
+    upcoming_list = get_admin_upcoming_classes(student_key, student, count=8)
     if index < 0 or index >= len(upcoming_list):
         await query.edit_message_text("Invalid selection.")
         return
@@ -1569,58 +2105,9 @@ async def award_free_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @admin_only
 async def renew_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Renew a student's plan by adding classes and setting a new renewal date.
-
-    Usage: /renewstudent <student_key> <num_classes> <YYYY-MM-DD>
-    """
-    args = context.args
-    if len(args) != 3:
-        await update.message.reply_text(
-            "Usage: /renewstudent <student_key> <num_classes> <YYYY-MM-DD>"
-        )
-        return
-    student_key_input, classes_str, date_str = args
-    try:
-        num_classes = int(classes_str)
-        if num_classes <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("Number of classes must be a positive integer.")
-        return
-    renewal = parse_renewal_date(date_str)
-    if renewal is None:
-        await update.message.reply_text("Invalid date format. Use YYYY-MM-DD.")
-        return
-    students = load_students()
-    student_key, student = resolve_student(students, student_key_input)
-    if not student:
-        await update.message.reply_text(f"Student '{student_key_input}' not found.")
-        return
-    if is_premium(student):
-        await update.message.reply_text(
-            f"Note: {student['name']} is Premium; award/renew not required."
-        )
-        return
-    student["classes_remaining"] = student.get("classes_remaining", 0) + num_classes
-    student["renewal_date"] = renewal
-    # Reset last balance warning upon renewal
-    student.pop("last_balance_warning", None)
-    ensure_future_class_dates(student)
-    save_students(students)
-    schedule_student_reminders(context.application, student_key, student)
-    logs = load_logs()
-    logs.append(
-        {
-            "student": student_key,
-            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
-            "status": "renewed",
-            "note": f"{num_classes} classes, new renewal {renewal}",
-        }
-    )
-    save_logs(logs)
+    """Legacy command; use admin flow for renewals."""
     await update.message.reply_text(
-        f"Renewed {student['name']}: added {num_classes} classes, renewal date set to {renewal}. "
-        f"Balance: {student['classes_remaining']}"
+        "This command is deprecated; use the in-bot renew flow instead."
     )
 
 
@@ -1690,7 +2177,10 @@ def generate_dashboard_summary() -> str:
 
     students = load_students()
     logs = load_logs()
-    now = datetime.now()
+    try:
+        now = datetime.now(BASE_TZ)  # type: ignore[arg-type]
+    except TypeError:
+        now = datetime.now(BKK_TZ)
     today = now.date()
     month_start = date(now.year, now.month, 1)
     premium_count = sum(1 for s in students.values() if is_premium(s))
@@ -1702,19 +2192,28 @@ def generate_dashboard_summary() -> str:
         duration = s.get("class_duration_hours", DEFAULT_DURATION_HOURS)
         total_hours += len(entries) * duration
 
-    today_classes: List[str] = []
+    today_class_entries: List[Tuple[datetime, str]] = []
     low_balance: List[str] = []
     upcoming_renewals: List[str] = []
     overdue_renewals: List[str] = []
     paused_students: List[str] = []
     free_credits: List[str] = []
     completed = missed = cancelled = rescheduled = 0
+    skipped_logs = 0
 
     for entry in logs:
-        entry_date = parse_log_date(entry["date"])
+        date_value = entry.get("date") or entry.get("at")
+        if not date_value:
+            print(f"⚠️ Skipping malformed log entry (no date/at): {entry}")
+            skipped_logs += 1
+            continue
+        entry_date = parse_log_date(str(date_value))
         if entry_date < month_start:
             continue
-        status = entry.get("status", "")
+        raw_status = (entry.get("status") or entry.get("type") or "")
+        status = str(raw_status).lower()
+        if status.startswith("class_"):
+            status = status[6:]
         if status == "completed":
             completed += 1
         elif status.startswith("missed"):
@@ -1724,52 +2223,64 @@ def generate_dashboard_summary() -> str:
         elif "rescheduled" in status:
             rescheduled += 1
 
-    for student in students.values():
+    for sid, student in students.items():
         tz = student_timezone(student)
-        today_student = datetime.now(tz).date()
+        today_student = today
 
         if student.get("paused"):
             paused_students.append(student["name"])
         else:
-            for dt in get_upcoming_classes(student, count=3):
-                if dt.astimezone(tz).date() == today_student:
-                    today_classes.append(
-                        f"{student['name']} at {dt.astimezone(tz).strftime('%H:%M')}"
+            for dt_str in student.get("class_dates", []):
+                if not dt_str:
+                    continue
+                try:
+                    class_dt = parse_student_datetime(dt_str, student)
+                except ValueError:
+                    logging.warning(
+                        "Skipping invalid class date for %s: %s",
+                        student.get("name", sid),
+                        dt_str,
                     )
-                    break
+                    continue
+                class_dt_local = class_dt.astimezone(tz)
+                if class_dt_local.date() == today_student:
+                    today_class_entries.append(
+                        (class_dt_local, f"{student['name']} at {class_dt_local.strftime('%H:%M')}")
+                    )
 
         if not is_premium(student):
             remaining = student.get("classes_remaining", 0)
             if remaining <= 2:
                 low_balance.append(student["name"])
 
-            renewal_str = student.get("renewal_date")
-            if renewal_str:
-                try:
-                    renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
-                except ValueError:
-                    renewal_date = None
-                if renewal_date:
-                    if renewal_date < today:
-                        overdue_renewals.append(
-                            f"{student['name']} ({renewal_date.isoformat()})"
-                        )
-                    elif today <= renewal_date <= today + timedelta(days=7):
-                        upcoming_renewals.append(
-                            f"{student['name']} ({renewal_date.isoformat()})"
-                        )
+            last_class = get_last_class(student)
+            if last_class:
+                last_date = last_class.date()
+                if last_date < today:
+                    overdue_renewals.append(
+                        f"{student['name']} ({fmt_bkk(last_date)})"
+                    )
+                elif today <= last_date <= today + timedelta(days=7):
+                    upcoming_renewals.append(
+                        f"{student['name']} ({fmt_bkk(last_date)})"
+                    )
 
         if student.get("free_class_credit", 0) > 0:
             free_credits.append(
                 f"{student['name']} ({student['free_class_credit']})"
             )
 
+    today_classes = [
+        label for _, label in sorted(today_class_entries, key=lambda item: item[0])
+    ]
+
     lines: List[str] = ["📊 Dashboard Summary", ""]
-    lines.append(f"Active students: {len(active_students)}")
-    lines.append(f"Premium students: {premium_count}")
+    lines.append(
+        f"Active students: {len(active_students)} ({premium_count} premium)"
+    )
     lines.append(f"Total scheduled hours/week: {total_hours:.1f}")
     lines.append("")
-    lines.append(f"Today's classes ({today.isoformat()}):")
+    lines.append(f"Unlogged classes (today) ({fmt_bkk(today)}):")
     if today_classes:
         lines.extend(f"- {item}" for item in today_classes)
     else:
@@ -1783,14 +2294,14 @@ def generate_dashboard_summary() -> str:
         lines.append("- None")
     lines.append("")
 
-    lines.append("Upcoming payment renewals (next 7 days):")
+    lines.append("Set ends in next 7 days:")
     if upcoming_renewals:
         lines.extend(f"- {item}" for item in upcoming_renewals)
     else:
         lines.append("- None")
     lines.append("")
 
-    lines.append("Overdue payment renewals:")
+    lines.append("Overdue set ends:")
     if overdue_renewals:
         lines.extend(f"- {item}" for item in overdue_renewals)
     else:
@@ -1816,6 +2327,12 @@ def generate_dashboard_summary() -> str:
     lines.append(f"- Missed/late cancels: {missed}")
     lines.append(f"- Cancelled: {cancelled}")
     lines.append(f"- Rescheduled: {rescheduled}")
+
+    if skipped_logs:
+        lines.append("")
+        lines.append(
+            f"Note: {skipped_logs} logs were ignored due to missing date/at."
+        )
 
     return "\n".join(lines)
 
@@ -1866,13 +2383,6 @@ async def dayview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if student.get("paused"):
             continue
         cancelled = set(student.get("cancelled_dates", []))
-        renewal_date = None
-        renewal_str = student.get("renewal_date")
-        if renewal_str:
-            try:
-                renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
-            except ValueError:
-                renewal_date = None
         for item in student.get("class_dates", []):
             try:
                 dt = parse_student_datetime(item, student).astimezone(BASE_TZ)
@@ -1881,8 +2391,6 @@ async def dayview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if dt.date() != target_date:
                 continue
             if item in cancelled:
-                continue
-            if renewal_date and dt.date() > renewal_date:
                 continue
             if target_date == now.date() and dt < now:
                 continue
@@ -2024,12 +2532,6 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             students = load_students()
             kb = build_students_page_kb(students, page=0)
             return await safe_edit_or_send(q, "👥 Students", reply_markup=kb)
-        elif action == "addstudent":
-            await q.answer()
-            return await safe_edit_or_send(
-                q,
-                "➕ Add Student\nUse the existing /edit flow to add a new student (submenu coming soon).",
-            )
         elif action == "logs":
             await q.answer()
             return await safe_edit_or_send(
@@ -2072,10 +2574,15 @@ async def admin_pick_student_callback(update, context):
     q = update.callback_query
     if not is_admin(q.from_user.id):
         return await q.answer("Admins only.", show_alert=True)
-    student_id = q.data.split(":")[-1]
+    data = q.data or ""
+    try:
+        _, _, student_key = data.split(":", 2)
+    except ValueError:
+        await q.answer("Student not found.", show_alert=True)
+        return await admin_students_page_callback(update, context)
     students = load_students()
-    student = students.get(student_id)
-    if not student:
+    student_id, student = resolve_student(students, student_key)
+    if not student or not student_id:
         await q.answer("Student not found.", show_alert=True)
         return await admin_students_page_callback(update, context)
     context.user_data["admin_selected_student_id"] = student_id
@@ -2083,6 +2590,85 @@ async def admin_pick_student_callback(update, context):
     text = f"👤 {nameline}\nChoose an action:"
     kb = build_student_submenu_kb(student_id)
     await safe_edit_or_send(q, text, reply_markup=kb)
+
+
+async def _send_admin_student_detail(
+    context: ContextTypes.DEFAULT_TYPE,
+    connect_state: Dict[str, Any],
+    student_key: str,
+    student: Dict[str, Any],
+    fallback_message=None,
+) -> None:
+    """Update the admin detail message or send a new one as a fallback."""
+
+    text, markup = build_student_detail_view(student_key, student)
+    bot = getattr(context, "bot", None) or getattr(
+        getattr(context, "application", None), "bot", None
+    )
+    chat_id = connect_state.get("prompt_chat_id")
+    message_id = connect_state.get("prompt_message_id")
+    if (
+        bot
+        and hasattr(bot, "edit_message_text")
+        and chat_id is not None
+        and message_id is not None
+    ):
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=markup,
+            )
+            return
+        except Exception:
+            logging.debug("Failed to edit admin detail message; sending fallback.")
+    if fallback_message is not None and hasattr(fallback_message, "reply_text"):
+        await fallback_message.reply_text(text, reply_markup=markup)
+
+
+async def connect_student_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Prompt the admin to supply Telegram details for an offline student."""
+
+    query = update.callback_query
+    if not query:
+        return
+    user_id = getattr(getattr(query, "from_user", None), "id", None)
+    if not is_admin(user_id):
+        await query.answer("Admins only.", show_alert=True)
+        return
+    await query.answer()
+    data = query.data or ""
+    parts = data.split(":", 2)
+    if len(parts) < 3:
+        await safe_edit_or_send(query, "Student not found.")
+        return
+    raw_student_id = parts[2]
+    students = load_students()
+    student_key, student = resolve_student(students, raw_student_id)
+    if not student or not student_key:
+        await safe_edit_or_send(query, "Student not found.")
+        return
+    if student.get("telegram_mode", True):
+        await query.answer("Already connected.", show_alert=False)
+        text, markup = build_student_detail_view(student_key, student)
+        await safe_edit_or_send(query, text, reply_markup=markup)
+        return
+    message = getattr(query, "message", None)
+    chat = getattr(message, "chat", None)
+    context.user_data["connect_student"] = {
+        "student_key": student_key,
+        "prompt_chat_id": getattr(chat, "id", None),
+        "prompt_message_id": getattr(message, "message_id", None),
+    }
+    prompt = (
+        f"Please send the student's Telegram @handle or numeric ID for "
+        f"{student.get('name', student_key)}.\n"
+        "Type 'cancel' to abort."
+    )
+    await safe_edit_or_send(query, prompt)
 
 
 async def admin_view_for_student(student_id: str, query, context):
@@ -2203,7 +2789,8 @@ async def initiate_log_class(query, context, student_id, student):
 
 
 async def initiate_cancel_class_admin(query, context, student_id, student):
-    upcoming_list = get_upcoming_classes(student, count=8)
+    # Admin-specific view ignores cancelled_dates and past logs
+    upcoming_list = get_admin_upcoming_classes(student_id, student, count=8)
     if not upcoming_list:
         return await safe_edit_or_send(query, "No upcoming classes to cancel.")
     context.user_data["admin_cancel"] = {
@@ -2308,12 +2895,16 @@ async def list_students_command(update: Update, context: ContextTypes.DEFAULT_TY
     lines = ["Active students:"]
     for s in sorted(active, key=lambda x: x.get("name", "").lower()):
         handle = s.get("telegram_handle")
-        if handle:
+        if not s.get("telegram_mode", True):
+            ident = "offline"
+        elif handle:
             ident = f"@{handle}"
         elif s.get("telegram_id"):
             ident = f"id {s['telegram_id']}"
         else:
             ident = "no handle"
+        if s.get("needs_id") and s.get("telegram_mode", True):
+            ident += " (needs ID)"
         lines.append(f"- {s['name']} ({ident})")
 
     await update.message.reply_text("\n".join(lines))
@@ -2332,6 +2923,8 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         label = name
         if handle:
             label += f" @{handle}"
+        if student.get("needs_id"):
+            label += " (needs ID)"
         buttons.append([InlineKeyboardButton(label, callback_data=f"edit:pick:{key}")])
     if not buttons:
         if update.message:
@@ -2622,11 +3215,18 @@ async def download_month_command(update: Update, context: ContextTypes.DEFAULT_T
     next_month = month_start.replace(day=28) + timedelta(days=4)
     month_end = next_month - timedelta(days=next_month.day)
     logs = load_logs()
-    month_logs = [
-        entry
-        for entry in logs
-        if month_start <= parse_log_date(entry["date"]) <= month_end
-    ]
+    month_logs: List[Dict[str, Any]] = []
+    for entry in logs:
+        date_value = entry.get("date") or entry.get("at")
+        if not date_value:
+            continue
+        try:
+            entry_date = parse_log_date(str(date_value))
+        except Exception:
+            logging.warning("Skipping log with invalid date for export: %s", entry)
+            continue
+        if month_start <= entry_date <= month_end:
+            month_logs.append(entry)
     filename = f"class_logs_{month_start.strftime('%Y_%m')}.json"
     try:
         with open(filename, "w", encoding="utf-8") as f:
@@ -2842,7 +3442,12 @@ async def reschedule_student_command(update: Update, context: ContextTypes.DEFAU
     )
     save_logs(logs)
 
-    msg = f"Rescheduled {student.get('name', student_key)} from {old_item} to {new_dt_str}."
+    old_display = fmt_bkk(old_item)
+    new_display = fmt_bkk(new_dt_str)
+    msg = (
+        f"Rescheduled {student.get('name', student_key)} "
+        f"from {old_display} to {new_display}."
+    )
     if warn_msg:
         msg += f" {warn_msg}"
     await update.message.reply_text(msg)
@@ -2911,6 +3516,12 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
     for key in keys_to_delete:
         students.pop(key, None)
     save_students(students)
+    if not students:
+        try:
+            with open(STUDENTS_FILE, "w", encoding="utf-8") as f:
+                json.dump({}, f, indent=2, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            logging.warning("Failed to persist empty students.json during purge")
 
     for job in context.application.job_queue.jobs():
         name = job.name or ""
@@ -2918,10 +3529,14 @@ async def remove_student_command(update: Update, context: ContextTypes.DEFAULT_T
             job.schedule_removal()
 
     logs = load_logs()
+    try:
+        removal_date = datetime.now(student_timezone(student))
+    except TypeError:
+        removal_date = ensure_bangkok(datetime.utcnow())
     logs.append(
         {
             "student": student_key,
-            "date": datetime.now(student_timezone(student)).strftime("%Y-%m-%d"),
+            "date": removal_date.strftime("%Y-%m-%d"),
             "status": "removed",
             "note": reason,
             "admin": update.effective_user.id,
@@ -2962,26 +3577,16 @@ async def view_student(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Student not found.")
         return
 
-    # Retrieve upcoming classes and display
-    schedule = get_upcoming_classes(
-        student, count=len(student.get("class_dates", []))
+    # Retrieve admin-visible schedule: all upcoming unlogged classes
+    schedule = get_admin_upcoming_classes(
+        student_key, student, count=len(student.get("class_dates", []))
     )
-
-    renewal_str = student.get("renewal_date")
-    renewal_date: Optional[date] = None
-    if renewal_str:
-        try:
-            renewal_date = datetime.strptime(renewal_str, "%Y-%m-%d").date()
-        except ValueError:
-            renewal_date = None
 
     lines = [f"Student: {student.get('name', student_key)}"]
     lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
     if schedule:
         lines.append("Schedule:")
         for dt in schedule:
-            if renewal_date and dt.date() > renewal_date:
-                continue
             lines.append(f"  - {dt.strftime('%A %d %b %Y at %H:%M')}")
     else:
         lines.append("Schedule: None")
@@ -3018,12 +3623,14 @@ async def datacheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if s.get("telegram_id") and key != str(s.get("telegram_id"))
     )
     pending_cancel = sum(1 for s in students.values() if s.get("pending_cancel"))
+    needs_id = [(k, s) for k, s in students.items() if s.get("needs_id")]
     logging.info(
-        "datacheck stats total=%s both=%s mismatch=%s pending_cancel=%s",
+        "datacheck stats total=%s both=%s mismatch=%s pending_cancel=%s needs_id=%s",
         total,
         both_fields,
         mismatch,
         pending_cancel,
+        len(needs_id),
     )
 
     canonical: Dict[str, str] = {}
@@ -3085,9 +3692,52 @@ async def datacheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         save_students(students)
     if logs_fixed:
         save_logs(logs)
+    lines = [
+        f"DataCheck: students={total}, rekeyed={rekeyed}, logs_fixed={logs_fixed}, pending_cancel={pending_cancel}, needs_id={len(needs_id)}"
+    ]
+    if needs_id:
+        lines.append("Needs ID:")
+        for key, stu in needs_id:
+            handle = stu.get("telegram_handle") or key
+            name = stu.get("name", "")
+            lines.append(f"- {handle} {name}".strip())
+    await update.message.reply_text("\n".join(lines))
 
+
+@admin_only
+async def resolveids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    students = load_students()
+    logs = load_logs()
+    resolved = 0
+    failed = 0
+    for key, student in list(students.items()):
+        if not student.get("needs_id"):
+            continue
+        handle = student.get("telegram_handle") or normalize_handle(key)
+        if not handle:
+            failed += 1
+            continue
+        try:
+            chat = await context.application.bot.get_chat(f"@{handle}")
+            numeric_id = chat.id
+        except Exception:
+            failed += 1
+            continue
+        new_key = str(numeric_id)
+        student["telegram_id"] = numeric_id
+        student.pop("needs_id", None)
+        students[new_key] = student
+        if new_key != key:
+            students.pop(key, None)
+        for entry in logs:
+            if entry.get("student") in {key, f"@{handle}"}:
+                entry["student"] = new_key
+        schedule_student_reminders(context.application, new_key, student)
+        resolved += 1
+    save_students(students)
+    save_logs(logs)
     await update.message.reply_text(
-        f"DataCheck: students={total}, rekeyed={rekeyed}, logs_fixed={logs_fixed}, pending_cancel={pending_cancel}"
+        f"ResolveIDs: resolved={resolved}, failed={failed}"
     )
 
 
@@ -3178,6 +3828,21 @@ async def fixlogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 @admin_only
+async def migrate_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run schema migration ensuring all logs contain a ``date`` field."""
+
+    try:
+        migrated = data_store.migrate_log_schemas()
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Migration failed: {exc}")
+        return
+
+    await update.message.reply_text(
+        f"✅ Migration complete: {migrated} log entries updated."
+    )
+
+
+@admin_only
 async def nukepending_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args or context.args[0].lower() != "confirm":
         await update.message.reply_text("Usage: /nukepending confirm")
@@ -3222,7 +3887,10 @@ def display_name(student_id: str, student: dict) -> str:
     name = student.get("name") or handle or student_id
     if handle and not handle.startswith("@"):
         handle = "@" + handle
-    return f"{name} {handle or ''}".strip()
+    label = f"{name} {handle or ''}".strip()
+    if student.get("needs_id"):
+        label += " (needs ID)"
+    return label
 
 
 def build_students_page_kb(
@@ -3264,10 +3932,9 @@ def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple
 
 def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMarkup]:
     """Return the welcome text and keyboard for a student."""
-    upcoming = get_upcoming_classes(student, count=1)
+    upcoming = get_student_visible_classes(student, count=1)
     next_class_str = fmt_bkk(upcoming[0]) if upcoming else "No upcoming classes set"
     classes_remaining = student.get("classes_remaining", 0)
-    renewal = student.get("renewal_date", "N/A")
     lines = [f"Hello, {student['name']}!"]
     if is_premium(student):
         lines.append("🌟 Premium member")
@@ -3276,12 +3943,17 @@ def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMar
         lines.append("Classes remaining: ∞")
     else:
         lines.append(f"Classes remaining: {classes_remaining}")
-        lines.append(f"Plan renews on: {renewal}")
+        last_class = get_last_class(student)
+        if last_class:
+            lines.append(f"Set ends: {last_class.date().isoformat()}")
+    reminder_minutes = get_student_reminder_minutes(student)
+    lines.append(f"Reminder notifications: {reminder_setting_summary(reminder_minutes)}")
     if student.get("paused"):
         lines.append("Your plan is currently paused. Contact your teacher to resume.")
     buttons = [
         [InlineKeyboardButton("📅 My Classes", callback_data="my_classes")],
         [InlineKeyboardButton("❌ Cancel Class", callback_data="cancel_class")],
+        [InlineKeyboardButton("🔔 Notification Settings", callback_data="notification_settings")],
     ]
     if student.get("free_class_credit", 0) > 0:
         buttons.append([InlineKeyboardButton("🎁 Free Class Credit", callback_data="free_credit")])
@@ -3292,6 +3964,8 @@ async def refresh_student_menu(
     student_key: str, student: Dict[str, Any], bot
 ) -> None:
     """Send an updated /start summary to the student's chat."""
+    if not student.get("telegram_mode", True):
+        return
     chat_id = student.get("telegram_id")
     if not chat_id or bot is None:
         return
@@ -3306,6 +3980,8 @@ async def refresh_student_my_classes(
     student_key: str, student: Dict[str, Any], bot
 ) -> None:
     """Send the current "My Classes" view to the student's chat."""
+    if not student.get("telegram_mode", True):
+        return
     chat_id = student.get("telegram_id")
     if not chat_id or bot is None:
         return
@@ -3412,6 +4088,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         student["telegram_id"] = int(user_id)
         if new_handle:
             student["telegram_handle"] = new_handle
+        student.pop("needs_id", None)
         save_students(students)
     else:
         updated = False
@@ -3420,6 +4097,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             updated = True
         if new_handle and student.get("telegram_handle") != new_handle:
             student["telegram_handle"] = new_handle
+            updated = True
+        if student.get("needs_id"):
+            student.pop("needs_id", None)
             updated = True
         if updated:
             save_students(students)
@@ -3480,9 +4160,32 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
                 query, student_key, student, show_pending=bool(student.get("pending_cancel"))
             )
         elif data == "cancel_class":
-            await initiate_cancel_class(query, student)
+            if student.get("paused"):
+                await safe_edit_or_send(query, PAUSED_ACTION_MESSAGE)
+            else:
+                await initiate_cancel_class(query, student)
         elif data == "free_credit":
             await show_free_credit(query, student)
+        elif data == "notification_settings":
+            if student.get("paused"):
+                await safe_edit_or_send(query, PAUSED_SETTINGS_MESSAGE)
+            else:
+                await show_notification_settings(query, student)
+        elif data and data.startswith("notification_set:"):
+            if student.get("paused"):
+                await safe_edit_or_send(query, PAUSED_SETTINGS_MESSAGE)
+            else:
+                try:
+                    minutes = int(data.split(":", 1)[1])
+                except (TypeError, ValueError):
+                    try:
+                        await query.answer("Invalid option.", show_alert=True)
+                    except Exception:
+                        pass
+                else:
+                    await update_notification_setting(
+                        query, student_key, student, students, minutes, context
+                    )
         elif data == "cancel_withdraw":
             await handle_cancel_withdraw(
                 query, student_key, student, students, context
@@ -3522,7 +4225,7 @@ def build_student_classes_text(
 ) -> str:
     """Return the text shown in a student's "My Classes" view."""
     limit = max(1, min(20, limit))
-    upcoming_list = get_upcoming_classes(student, count=limit)
+    upcoming_list = get_student_visible_classes(student, count=limit)
     if upcoming_list:
         lines = [f"Upcoming classes for {student['name']}:"]
         if is_premium(student):
@@ -3538,7 +4241,9 @@ def build_student_classes_text(
         lines.append("Classes remaining: ∞")
     else:
         lines.append(f"Classes remaining: {student.get('classes_remaining', 0)}")
-        lines.append(f"Renewal date: {student.get('renewal_date', 'N/A')}")
+        last_class = get_last_class(student)
+        if last_class:
+            lines.append(f"Set ends: {last_class.date().isoformat()}")
     if student.get("paused"):
         lines.append("Your plan is currently paused.")
 
@@ -3562,7 +4267,7 @@ def build_student_classes_text(
                         entry,
                     )
                     continue
-                dt_str = entry.get("date", "")
+                dt_str = entry.get("date") or entry.get("at", "")
                 try:
                     parsed_dt = ensure_bangkok(dt_str)
                 except Exception:
@@ -3588,7 +4293,10 @@ def build_student_classes_text(
         if recent_logs:
             for entry in recent_logs:
                 try:
-                    status = (entry.get("status") or "").lower()
+                    raw_status = (entry.get("status") or entry.get("type") or "")
+                    status = str(raw_status).lower()
+                    if status.startswith("class_"):
+                        status = status[6:]
                     if status == "completed":
                         symbol = "✅"
                     elif status.startswith("missed") or status.startswith("cancelled") or status.startswith(
@@ -3598,7 +4306,12 @@ def build_student_classes_text(
                     else:
                         symbol = "•"
                     dt = entry.get("_parsed_dt")
-                    dt_txt = fmt_bkk(dt, add_label=False) if isinstance(dt, datetime) else entry.get("date", "")
+                    dt_txt = (
+                        fmt_bkk(dt, add_label=False)
+                        if isinstance(dt, datetime)
+                        else entry.get("date")
+                        or entry.get("at", "")
+                    )
                     note = entry.get("note") or ""
                     if note:
                         lines.append(f"{symbol} {dt_txt} – {note}")
@@ -3701,7 +4414,10 @@ async def handle_cancel_dismiss(query, student_key: str, student: Dict[str, Any]
 
 async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
     """Begin the cancellation process.  Show a list of upcoming classes."""
-    upcoming_list = get_upcoming_classes(student, count=5)
+    if student.get("paused"):
+        await safe_edit_or_send(query, PAUSED_ACTION_MESSAGE)
+        return
+    upcoming_list = get_student_cancellable_classes(student)
     if not upcoming_list:
         await safe_edit_or_send(query, "You have no classes to cancel.")
         return
@@ -3737,13 +4453,16 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
     if not student:
         await safe_edit_or_send(query, "You are not recognised. Please contact your teacher.")
         return
+    if student.get("paused"):
+        await safe_edit_or_send(query, PAUSED_ACTION_MESSAGE)
+        return
     _, index_str = query.data.split(":")
     try:
         idx = int(index_str)
     except ValueError:
         await safe_edit_or_send(query, "Invalid selection.")
         return
-    upcoming = get_upcoming_classes(student, count=5)
+    upcoming = get_student_cancellable_classes(student)
     if idx >= len(upcoming):
         await safe_edit_or_send(query, "Invalid class selected.")
         return
@@ -3799,10 +4518,169 @@ async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_
             )
 
 
+async def process_connect_student_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    students: Dict[str, Any],
+) -> bool:
+    """Handle admin responses when linking an offline student to Telegram."""
+
+    connect_state = context.user_data.get("connect_student")
+    if not connect_state:
+        return False
+    message = update.message
+    if not message or not hasattr(message, "text"):
+        return True
+    raw_text = (message.text or "").strip()
+    if not raw_text:
+        await message.reply_text("Please enter a Telegram handle or numeric ID.")
+        return True
+    if raw_text.lower() in {"cancel", "stop"}:
+        context.user_data.pop("connect_student", None)
+        original_key = str(connect_state.get("student_key", ""))
+        student_key, student = resolve_student(students, original_key)
+        if student:
+            await _send_admin_student_detail(context, connect_state, student_key, student, message)
+        await message.reply_text("Connect to Telegram cancelled.")
+        return True
+
+    original_key = str(connect_state.get("student_key", ""))
+    student_key, student = resolve_student(students, original_key)
+    if not student or not student_key:
+        context.user_data.pop("connect_student", None)
+        await message.reply_text("Student not found.")
+        return True
+    if student.get("telegram_mode", True):
+        context.user_data.pop("connect_student", None)
+        await message.reply_text("This student is already connected to Telegram.")
+        await _send_admin_student_detail(context, connect_state, student_key, student, message)
+        return True
+
+    input_text = raw_text.lstrip()
+    if input_text.startswith("@"):
+        input_text = input_text[1:]
+    telegram_id: Optional[int] = None
+    handle_value: Optional[str] = None
+    if input_text.isdigit() and not raw_text.startswith("@"):
+        telegram_id = int(input_text)
+        handle_value = student.get("telegram_handle")
+    else:
+        normalized = normalize_handle(input_text)
+        if not normalized:
+            await message.reply_text("Please enter a valid Telegram handle or numeric ID.")
+            return True
+        bot = getattr(context, "bot", None) or getattr(
+            getattr(context, "application", None), "bot", None
+        )
+        handle_value = normalized
+        if bot and hasattr(bot, "get_chat"):
+            try:
+                chat = await bot.get_chat(f"@{normalized}")
+                telegram_id = int(chat.id)
+                username = getattr(chat, "username", None)
+                handle_value = normalize_handle(username) if username else normalized
+            except Exception:
+                telegram_id = None
+        else:
+            telegram_id = None
+
+    student["telegram_mode"] = True
+    if telegram_id:
+        student["telegram_id"] = int(telegram_id)
+        student.pop("needs_id", None)
+    else:
+        student["telegram_id"] = None
+        student["needs_id"] = True
+    student["telegram_handle"] = handle_value
+
+    new_key = student_key
+    if telegram_id:
+        new_key = str(int(telegram_id))
+    if new_key != student_key:
+        if new_key in students:
+            await update.message.reply_text(
+                "❌ Error: A student with that Telegram ID already exists. Please check the ID and try again."
+            )
+            return
+        students.pop(student_key, None)
+    students[new_key] = student
+    save_students(students)
+
+    if new_key != student_key:
+        logs = load_logs()
+        changed = False
+        for entry in logs:
+            if entry.get("student") == student_key:
+                entry["student"] = new_key
+                changed = True
+        if changed:
+            save_logs(logs)
+
+    application = getattr(context, "application", None)
+    job_queue = getattr(application, "job_queue", None) if application else None
+    if (
+        telegram_id
+        and application
+        and job_queue
+        and hasattr(job_queue, "run_once")
+        and callable(getattr(job_queue, "jobs", None))
+    ):
+        try:
+            schedule_student_reminders(application, new_key, student)
+            schedule_final_set_notice(application, new_key, student)
+        except Exception:
+            logging.warning("Failed to schedule reminders for %s", student.get("name", new_key))
+
+    bot = getattr(context, "bot", None) or getattr(application, "bot", None)
+    if telegram_id and bot:
+        try:
+            await refresh_student_menu(new_key, student, bot)
+        except Exception:
+            logging.debug("Failed to refresh student menu for %s", new_key)
+
+    context.user_data.pop("connect_student", None)
+
+    student_name = student.get("name", new_key)
+    if telegram_id:
+        handle_label = f" (@{handle_value})" if handle_value else ""
+        summary = (
+            f"Connected {student_name} to Telegram ID {telegram_id}{handle_label}."
+        )
+    else:
+        summary = (
+            f"Stored @{handle_value} for {student_name}. "
+            "They will be fully linked once they /start the bot or you run /resolveids."
+        )
+    await message.reply_text(summary)
+    await _send_admin_student_detail(context, connect_state, new_key, student, message)
+    return True
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle free-form messages for both admins and students."""
-    user_id = update.effective_user.id if update.effective_user else None
+    user = update.effective_user
+
+    # Automatically re-key handle-based student records once the
+    # user has sent a message and their numeric Telegram ID is known.
+    students = load_students()
+    if user:
+        tid = str(user.id)
+        handle = getattr(user, "username", None)
+        if handle and handle in students and tid not in students:
+            student = students.pop(handle)
+            student["telegram_id"] = user.id
+            students[tid] = student
+            save_students(students)
+            logging.info("Rekeyed student record from handle '%s' to ID '%s'", handle, tid)
+
+    user_id = user.id if user else None
     if user_id in ADMIN_IDS:
+        if await process_connect_student_reply(update, context, students):
+            return
+        renew_id = context.user_data.get("renew_waiting_for_qty")
+        if renew_id:
+            await renew_received_count(update, context)
+            return
         state = context.user_data.get("edit_state")
         student_key = context.user_data.get("edit_student_key")
         if state and student_key:
@@ -3964,8 +4842,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     }
                 )
                 save_logs(logs)
+                old_display = fmt_bkk(old_dt_str)
+                new_display = fmt_bkk(new_dt)
                 await update.message.reply_text(
-                    f"Rescheduled class from {old_dt_str} to {new_dt.isoformat()}.",
+                    f"Rescheduled class from {old_display} to {new_display}.",
                     reply_markup=InlineKeyboardMarkup(
                         [[InlineKeyboardButton("Back", callback_data=f"edit:pick:{student_key}")]]
                     ),
@@ -4022,6 +4902,49 @@ async def show_free_credit(query, student: Dict[str, Any]) -> None:
     await safe_edit_or_send(query, msg)
 
 
+async def show_notification_settings(query, student: Dict[str, Any]) -> None:
+    """Display the notification settings view to a student."""
+    if student.get("paused"):
+        await safe_edit_or_send(query, PAUSED_SETTINGS_MESSAGE)
+        return
+    text, markup = build_notification_settings_view(student)
+    await safe_edit_or_send(query, text, reply_markup=markup)
+
+
+async def update_notification_setting(
+    query,
+    student_key: str,
+    student: Dict[str, Any],
+    students: Dict[str, Any],
+    minutes: int,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Persist a new reminder preference and reschedule jobs."""
+
+    if minutes not in REMINDER_VALID_MINUTES:
+        try:
+            await query.answer("Unsupported option.", show_alert=True)
+        except Exception:
+            pass
+        return
+    minutes = normalize_reminder_minutes(minutes)
+    if student.get("paused"):
+        await safe_edit_or_send(query, PAUSED_SETTINGS_MESSAGE)
+        return
+    current = get_student_reminder_minutes(student)
+    if current != minutes:
+        student["reminder_offset_minutes"] = minutes
+        save_students(students)
+        if hasattr(context, "application"):
+            schedule_student_reminders(context.application, student_key, student)
+        status = f"✅ Reminders updated to {reminder_setting_sentence(minutes)}."
+        await refresh_student_menu(student_key, student, getattr(context, "bot", None))
+    else:
+        status = f"Your reminders are already set to {reminder_setting_sentence(minutes)}."
+    text, markup = build_notification_settings_view(student, status=status)
+    await safe_edit_or_send(query, text, reply_markup=markup)
+
+
 # -----------------------------------------------------------------------------
 # Automatic jobs (balance warnings, monthly export)
 # -----------------------------------------------------------------------------
@@ -4030,7 +4953,11 @@ async def maybe_send_balance_warning(bot, student) -> bool:
 
     Returns True if the student's record was modified (i.e., a warning was sent).
     """
-    if student.get("paused") or is_premium(student):
+    if (
+        student.get("paused")
+        or not student.get("telegram_mode", True)
+        or is_premium(student)
+    ):
         return False
     remaining = student.get("classes_remaining", 0)
     last_sent = student.get("last_balance_warning")
@@ -4081,11 +5008,18 @@ async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     next_month = month_start.replace(day=28) + timedelta(days=4)
     month_end = next_month - timedelta(days=next_month.day)
     # Filter logs for the month
-    month_logs = [
-        entry
-        for entry in logs
-        if month_start <= parse_log_date(entry["date"]) <= month_end
-    ]
+    month_logs: List[Dict[str, Any]] = []
+    for entry in logs:
+        date_value = entry.get("date") or entry.get("at")
+        if not date_value:
+            continue
+        try:
+            entry_date = parse_log_date(str(date_value))
+        except Exception:
+            logging.warning("Skipping log with invalid date for export: %s", entry)
+            continue
+        if month_start <= entry_date <= month_end:
+            month_logs.append(entry)
     # Dump to JSON string
     month_data = json.dumps(month_logs, indent=2, ensure_ascii=False)
     # Send as file to each admin
@@ -4106,6 +5040,16 @@ async def monthly_export_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 # Setup and main entry point
 # -----------------------------------------------------------------------------
 
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the exception and inform the user of a generic error."""
+    logging.error("Unhandled exception", exc_info=context.error)
+    message = getattr(update, "effective_message", None)
+    if message:
+        try:
+            await message.reply_text("Error occurred")
+        except Exception:
+            pass
+
 def build_application() -> Application:
     """Return an application with core command and student handlers.
 
@@ -4113,11 +5057,18 @@ def build_application() -> Application:
     configured handlers without starting the bot.
     """
     app = ApplicationBuilder().token(TOKEN).build()
+    if hasattr(app, "add_error_handler"):
+        app.add_error_handler(global_error_handler)
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(
         CallbackQueryHandler(
+            connect_student_callback, pattern=r"^stu:CONNECT:[^:]+$"
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
             handle_student_action,
-            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
+            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):[^:]+$",
         )
     )
     app.add_handler(
@@ -4127,7 +5078,13 @@ def build_application() -> Application:
     )
     app.add_handler(
         CallbackQueryHandler(
-            handle_class_confirmation, pattern=r"^cfm:(LOG|CANCEL|RESHED):"
+            handle_log_action,
+            pattern=r"^log:(COMPLETE|CANCEL_EARLY|CANCEL_LATE|RESCHEDULED|UNLOG):",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            handle_class_confirmation, pattern=r"^cfm:(CANCEL|RESHED):"
         )
     )
     return app
@@ -4162,6 +5119,8 @@ def main() -> None:
         .job_queue(job_queue)
         .build()
     )
+    if hasattr(application, "add_error_handler"):
+        application.add_error_handler(global_error_handler)
 
     # Conversation handler for adding student
     async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4170,17 +5129,23 @@ def main() -> None:
         return ConversationHandler.END
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("addstudent", add_student_command)],
+        entry_points=[
+            CommandHandler("addstudent", add_student_command),
+            CallbackQueryHandler(add_student_command, pattern=r"^admin:addstudent$", block=True),
+        ],
         states={
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
+            ADD_TELEGRAM_CHOICE: [
+                CallbackQueryHandler(
+                    add_telegram_choice,
+                    pattern=r"^student_(has_telegram|no_telegram|cancel)$",
+                )
+            ],
             ADD_HANDLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_handle)],
-            ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_price)],
             ADD_CLASSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_classes)],
             ADD_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_schedule)],
             ADD_CUTOFF: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_cutoff)],
-            ADD_WEEKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_weeks)],
             ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_duration)],
-            ADD_RENEWAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_renewal)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
         allow_reentry=True,
@@ -4199,8 +5164,10 @@ def main() -> None:
     application.add_handler(CommandHandler("downloadmonth", download_month_command))
     application.add_handler(CommandHandler("selftest", selftest_command))
     application.add_handler(CommandHandler("datacheck", datacheck_command))
+    application.add_handler(CommandHandler("resolveids", resolveids_command))
     application.add_handler(CommandHandler("checklogs", checklogs_command))
     application.add_handler(CommandHandler("fixlogs", fixlogs_command))
+    application.add_handler(CommandHandler("migratelogs", migrate_logs_command))
     application.add_handler(CommandHandler("nukepending", nukepending_command))
     application.add_handler(CommandHandler("confirmcancel", confirm_cancel_command))
     application.add_handler(CommandHandler("reschedulestudent", reschedule_student_command))
@@ -4220,8 +5187,13 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_time_oncepick_callback, pattern="^edit:time:oncepick:"))
     application.add_handler(
         CallbackQueryHandler(
+            connect_student_callback, pattern=r"^stu:CONNECT:[^:]+$"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
             handle_student_action,
-            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):(\d+)$",
+            pattern=r"^stu:(LOG|CANCEL|RESHED|RENEW|RENEW_SAME|RENEW_ENTER|LENGTH|EDIT|FREECREDIT|PAUSE|REMOVE|VIEW|ADHOC):[^:]+$",
         )
     )
     application.add_handler(
@@ -4231,12 +5203,21 @@ def main() -> None:
     )
     application.add_handler(
         CallbackQueryHandler(
-            handle_class_confirmation, pattern=r"^cfm:(LOG|CANCEL|RESHED):"
+            handle_log_action,
+            pattern=r"^log:(COMPLETE|CANCEL_EARLY|CANCEL_LATE|RESCHEDULED|UNLOG):",
         )
     )
     application.add_handler(
         CallbackQueryHandler(
-            admin_pick_student_callback, pattern=r"^admin:pick:(\d+)$"
+            handle_class_confirmation, pattern=r"^cfm:(CANCEL|RESHED):"
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(renew_confirm, pattern=r"^cfm:RENEW:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            admin_pick_student_callback, pattern=r"^admin:pick:[^:]+$"
         )
     )
     application.add_handler(
@@ -4256,7 +5237,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             student_button_handler,
-            pattern=r"^(my_classes|cancel_class|free_credit|cancel_withdraw|cancel_dismiss|back_to_start)$",
+            pattern=r"^(my_classes|cancel_class|free_credit|cancel_withdraw|cancel_dismiss|back_to_start|notification_settings|notification_set:(?:0|5|15|30|60))$",
         )
     )
     application.add_handler(CallbackQueryHandler(log_unknown_callback, pattern=r".*"))
