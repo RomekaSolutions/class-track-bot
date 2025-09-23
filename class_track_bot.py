@@ -39,6 +39,9 @@ Author: ChatGPT
 import json
 import logging
 import os
+from dotenv import load_dotenv
+load_dotenv()
+
 import inspect
 from datetime import datetime, timedelta, time, date, timezone
 from typing import Dict, Any, List, Optional, Tuple, Union
