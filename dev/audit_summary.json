@@ -1,0 +1,656 @@
+{
+  "meta": {
+    "students": 12,
+    "logs": 148,
+    "today": "2025-09-25"
+  },
+  "orphan_student_logs_count": 20,
+  "orphan_student_logs_samples": [
+    {
+      "index": 19,
+      "student": "1430772716",
+      "status": "removed",
+      "date": "2025-08-18"
+    },
+    {
+      "index": 23,
+      "student": "1430772716",
+      "status": "completed",
+      "date": "2025-08-20"
+    },
+    {
+      "index": 25,
+      "student": "1430772716",
+      "status": "completed",
+      "date": "2025-08-22"
+    },
+    {
+      "index": 26,
+      "student": "1430772716",
+      "status": "completed",
+      "date": "2025-08-22"
+    },
+    {
+      "index": 27,
+      "student": "1430772716",
+      "status": "completed",
+      "date": "2025-08-22"
+    }
+  ],
+  "orphan_date_logs_count": 95,
+  "orphan_date_logs_samples": [
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "cancel_confirmed",
+      "raw_date": "2025-08-10",
+      "index": 0
+    },
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "completed",
+      "raw_date": "2025-08-10",
+      "index": 1
+    },
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "cancelled (early)",
+      "raw_date": "2025-08-10",
+      "index": 2
+    },
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "reschedule_requested",
+      "raw_date": "2025-08-10",
+      "index": 3
+    },
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "rescheduled_to_2025-09-11 13:00",
+      "raw_date": "2025-08-10",
+      "index": 4
+    }
+  ],
+  "orphan_date_logs_global_count": 68,
+  "orphan_date_logs_global_samples": [
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "cancel_confirmed",
+      "raw_date": "2025-08-10",
+      "index": 0
+    },
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "completed",
+      "raw_date": "2025-08-10",
+      "index": 1
+    },
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "cancelled (early)",
+      "raw_date": "2025-08-10",
+      "index": 2
+    },
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "reschedule_requested",
+      "raw_date": "2025-08-10",
+      "index": 3
+    },
+    {
+      "student": "1566976731",
+      "date": "2025-08-10",
+      "status": "rescheduled_to_2025-09-11 13:00",
+      "raw_date": "2025-08-10",
+      "index": 4
+    }
+  ],
+  "missing_logs_count": 21,
+  "missing_logs_samples": [
+    {
+      "student": "325871233",
+      "name": "Alexander",
+      "date": "2025-09-24",
+      "expected": 2,
+      "logged": 0
+    },
+    {
+      "student": "325871233",
+      "name": "Alexander",
+      "date": "2025-09-25",
+      "expected": 2,
+      "logged": 0
+    },
+    {
+      "student": "365509656",
+      "name": "Anna",
+      "date": "2025-09-22",
+      "expected": 1,
+      "logged": 0
+    },
+    {
+      "student": "408026385",
+      "name": "Daniel",
+      "date": "2025-09-18",
+      "expected": 1,
+      "logged": 0
+    },
+    {
+      "student": "408026385",
+      "name": "Daniel",
+      "date": "2025-09-25",
+      "expected": 1,
+      "logged": 0
+    }
+  ],
+  "students_with_past_no_logs": [
+    {
+      "student": "325871233",
+      "name": "Alexander",
+      "past_dates": [
+        "2025-09-24",
+        "2025-09-25"
+      ]
+    },
+    {
+      "student": "365509656",
+      "name": "Anna",
+      "past_dates": [
+        "2025-09-22"
+      ]
+    },
+    {
+      "student": "76032708",
+      "name": "Maria",
+      "past_dates": [
+        "2025-09-18",
+        "2025-09-19"
+      ]
+    },
+    {
+      "student": "aurika_flow",
+      "name": "Filipp",
+      "past_dates": [
+        "2025-09-11",
+        "2025-09-12",
+        "2025-09-18",
+        "2025-09-19",
+        "2025-09-25"
+      ]
+    },
+    {
+      "student": "jinn",
+      "name": "Jinn",
+      "past_dates": [
+        "2025-09-22",
+        "2025-09-23"
+      ]
+    }
+  ],
+  "student_completion_stats": [
+    {
+      "student": "446785918",
+      "name": "Yulia",
+      "expected": 11,
+      "actual": 12,
+      "completion_rate": 1.0909090909090908
+    },
+    {
+      "student": "742242",
+      "name": "Sergey",
+      "expected": 5,
+      "actual": 2,
+      "completion_rate": 0.4
+    },
+    {
+      "student": "408026385",
+      "name": "Daniel",
+      "expected": 3,
+      "actual": 1,
+      "completion_rate": 0.3333333333333333
+    },
+    {
+      "student": "883527125",
+      "name": "Zaura & Igor",
+      "expected": 6,
+      "actual": 1,
+      "completion_rate": 0.16666666666666666
+    },
+    {
+      "student": "365509656",
+      "name": "Anna",
+      "expected": 1,
+      "actual": 0,
+      "completion_rate": 0.0
+    },
+    {
+      "student": "76032708",
+      "name": "Maria",
+      "expected": 2,
+      "actual": 0,
+      "completion_rate": 0.0
+    },
+    {
+      "student": "jinn",
+      "name": "Jinn",
+      "expected": 2,
+      "actual": 0,
+      "completion_rate": 0.0
+    },
+    {
+      "student": "325871233",
+      "name": "Alexander",
+      "expected": 4,
+      "actual": 0,
+      "completion_rate": 0.0
+    },
+    {
+      "student": "aurika_flow",
+      "name": "Filipp",
+      "expected": 5,
+      "actual": 0,
+      "completion_rate": 0.0
+    },
+    {
+      "student": "1566976731",
+      "name": "Gregor",
+      "expected": 0,
+      "actual": 0,
+      "completion_rate": null
+    },
+    {
+      "student": "468212483",
+      "name": "Oleg",
+      "expected": 0,
+      "actual": 0,
+      "completion_rate": null
+    },
+    {
+      "student": "868930626",
+      "name": "Svetlana",
+      "expected": 0,
+      "actual": 0,
+      "completion_rate": null
+    }
+  ],
+  "schedule_parse_errors": [],
+  "schedule_naive_strings": [],
+  "log_parse_errors": [
+    {
+      "index": 100,
+      "student": "1566976731",
+      "status": null,
+      "date": null
+    },
+    {
+      "index": 101,
+      "student": "1566976731",
+      "status": null,
+      "date": null
+    },
+    {
+      "index": 130,
+      "student": "76032708",
+      "status": null,
+      "date": null
+    }
+  ],
+  "log_naive_strings": [],
+  "log_timezone_issues": [],
+  "schedule_timezone_issues": [],
+  "logs_missing_required": [
+    {
+      "index": 100,
+      "missing": [
+        "date",
+        "status"
+      ],
+      "entry": {
+        "new_value": true,
+        "student": "1566976731",
+        "ts": "2025-09-07T15:43:54.890610",
+        "type": "pause_toggled"
+      }
+    },
+    {
+      "index": 101,
+      "missing": [
+        "date",
+        "status"
+      ],
+      "entry": {
+        "new_value": false,
+        "student": "1566976731",
+        "ts": "2025-09-07T15:43:59.486123",
+        "type": "pause_toggled"
+      }
+    },
+    {
+      "index": 130,
+      "missing": [
+        "date",
+        "status"
+      ],
+      "entry": {
+        "new_value": false,
+        "student": "76032708",
+        "ts": "2025-09-23T16:47:46.356446",
+        "type": "pause_toggled"
+      }
+    }
+  ],
+  "invalid_students": [
+    {
+      "student": "aurika_flow",
+      "name": "Filipp",
+      "issues": [
+        "missing telegram_id"
+      ]
+    },
+    {
+      "student": "jinn",
+      "name": "Jinn",
+      "issues": [
+        "missing telegram_id"
+      ]
+    }
+  ],
+  "student_schema_variants": [
+    [
+      [
+        "cancelled_dates",
+        "classes_remaining",
+        "cutoff_hours",
+        "telegram_handle",
+        "free_class_credit",
+        "class_dates",
+        "paused",
+        "notes",
+        "cycle_weeks",
+        "reminder_offset_minutes",
+        "reschedule_credit",
+        "telegram_id",
+        "name",
+        "plan_price",
+        "class_duration_hours",
+        "schedule_pattern"
+      ],
+      3
+    ],
+    [
+      [
+        "classes_remaining",
+        "cutoff_hours",
+        "telegram_handle",
+        "free_class_credit",
+        "class_dates",
+        "paused",
+        "notes",
+        "cycle_weeks",
+        "reminder_offset_minutes",
+        "reschedule_credit",
+        "telegram_id",
+        "name",
+        "plan_price",
+        "class_duration_hours",
+        "schedule_pattern"
+      ],
+      2
+    ],
+    [
+      [
+        "cancelled_dates",
+        "classes_remaining",
+        "cutoff_hours",
+        "telegram_handle",
+        "free_class_credit",
+        "premium",
+        "class_dates",
+        "paused",
+        "notes",
+        "cycle_weeks",
+        "reminder_offset_minutes",
+        "reschedule_credit",
+        "telegram_id",
+        "name",
+        "last_balance_warning",
+        "plan_price",
+        "class_duration_hours",
+        "schedule_pattern"
+      ],
+      1
+    ],
+    [
+      [
+        "classes_remaining",
+        "cutoff_hours",
+        "telegram_handle",
+        "free_class_credit",
+        "class_dates",
+        "paused",
+        "notes",
+        "cycle_weeks",
+        "reminder_offset_minutes",
+        "reschedule_credit",
+        "telegram_id",
+        "name",
+        "class_duration_hours",
+        "schedule_pattern"
+      ],
+      1
+    ],
+    [
+      [
+        "classes_remaining",
+        "cutoff_hours",
+        "telegram_handle",
+        "free_class_credit",
+        "class_dates",
+        "paused",
+        "notes",
+        "cycle_weeks",
+        "reminder_offset_minutes",
+        "reschedule_credit",
+        "telegram_id",
+        "name",
+        "telegram_mode",
+        "class_duration_hours",
+        "schedule_pattern"
+      ],
+      1
+    ],
+    [
+      [
+        "cancelled_dates",
+        "classes_remaining",
+        "cutoff_hours",
+        "telegram_handle",
+        "free_class_credit",
+        "premium",
+        "class_dates",
+        "paused",
+        "notes",
+        "cycle_weeks",
+        "reminder_offset_minutes",
+        "reschedule_credit",
+        "telegram_id",
+        "name",
+        "plan_price",
+        "class_duration_hours",
+        "schedule_pattern"
+      ],
+      1
+    ],
+    [
+      [
+        "cancelled_dates",
+        "classes_remaining",
+        "cutoff_hours",
+        "telegram_handle",
+        "free_class_credit",
+        "class_dates",
+        "paused",
+        "notes",
+        "cycle_weeks",
+        "reminder_offset_minutes",
+        "reschedule_credit",
+        "telegram_id",
+        "name",
+        "class_duration_hours",
+        "schedule_pattern"
+      ],
+      1
+    ],
+    [
+      [
+        "needs_id",
+        "classes_remaining",
+        "cutoff_hours",
+        "telegram_handle",
+        "free_class_credit",
+        "class_dates",
+        "paused",
+        "notes",
+        "cycle_weeks",
+        "reminder_offset_minutes",
+        "reschedule_credit",
+        "telegram_id",
+        "name",
+        "plan_price",
+        "class_duration_hours",
+        "schedule_pattern"
+      ],
+      1
+    ],
+    [
+      [
+        "needs_id",
+        "classes_remaining",
+        "cutoff_hours",
+        "telegram_handle",
+        "free_class_credit",
+        "class_dates",
+        "paused",
+        "notes",
+        "cycle_weeks",
+        "reminder_offset_minutes",
+        "reschedule_credit",
+        "telegram_id",
+        "name",
+        "telegram_mode",
+        "class_duration_hours",
+        "schedule_pattern"
+      ],
+      1
+    ]
+  ],
+  "log_schema_variants": [
+    [
+      [
+        "status",
+        "date",
+        "note",
+        "student"
+      ],
+      90
+    ],
+    [
+      [
+        "note",
+        "student",
+        "admin",
+        "date",
+        "status"
+      ],
+      27
+    ],
+    [
+      [
+        "student",
+        "date",
+        "type",
+        "status",
+        "at",
+        "ts"
+      ],
+      18
+    ],
+    [
+      [
+        "ts",
+        "status",
+        "date",
+        "student"
+      ],
+      10
+    ],
+    [
+      [
+        "ts",
+        "type",
+        "new_value",
+        "student"
+      ],
+      3
+    ]
+  ],
+  "business_flags": {
+    "class_credit_no_future": [],
+    "future_with_zero_credit": [
+      {
+        "student": "742242",
+        "name": "Sergey",
+        "upcoming_classes": 6,
+        "classes_remaining": 0
+      }
+    ],
+    "premium_visibility": [
+      {
+        "student": "742242",
+        "name": "Sergey",
+        "upcoming_classes": 6,
+        "classes_remaining": 0
+      }
+    ]
+  },
+  "duplicate_classes": [
+    {
+      "student": "742242",
+      "name": "Sergey",
+      "datetime": "2025-09-24T13:00:00+07:00",
+      "count": 2
+    },
+    {
+      "student": "742242",
+      "name": "Sergey",
+      "datetime": "2025-09-29T13:00:00+07:00",
+      "count": 2
+    },
+    {
+      "student": "742242",
+      "name": "Sergey",
+      "datetime": "2025-10-01T13:00:00+07:00",
+      "count": 2
+    },
+    {
+      "student": "76032708",
+      "name": "Maria",
+      "datetime": "2025-10-09T11:00:00+07:00",
+      "count": 2
+    },
+    {
+      "student": "76032708",
+      "name": "Maria",
+      "datetime": "2025-10-16T11:00:00+07:00",
+      "count": 2
+    }
+  ]
+}

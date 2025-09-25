@@ -757,197 +757,220 @@
     "ts": "2025-09-11T11:58:17.899866"
   },
   {
-    "at": "2025-09-22T10:00:00+07:00",
-    "date": "2025-09-22T10:00:00+07:00",
-    "status": "completed",
-    "student": "446785918",
-    "ts": "2025-09-23T16:13:18.838750",
+    "at": "2025-09-12T11:00:00+07:00",
+    "student": "365509656",
+    "ts": "2025-09-12T10:09:35.326452",
     "type": "class_completed"
   },
   {
-    "at": "2025-09-22T18:00:00+07:00",
-    "date": "2025-09-22T18:00:00+07:00",
-    "status": "completed",
-    "student": "446785918",
-    "ts": "2025-09-23T16:13:52.424175",
-    "type": "class_completed"
-  },
-  {
-    "at": "2025-09-23T18:00:00+07:00",
-    "date": "2025-09-23T18:00:00+07:00",
-    "status": "completed",
-    "student": "446785918",
-    "ts": "2025-09-23T16:14:09.648124",
-    "type": "class_completed"
-  },
-  {
-    "at": "2025-09-23T09:45:00+07:00",
-    "date": "2025-09-23T09:45:00+07:00",
-    "status": "completed",
-    "student": "883527125",
-    "ts": "2025-09-23T16:14:38.915177",
-    "type": "class_completed"
-  },
-  {
-    "at": "2025-09-23T11:00:00+07:00",
-    "date": "2025-09-23T11:00:00+07:00",
-    "status": "completed",
+    "at": "2025-10-07T11:00:00+07:00",
+    "is_late": false,
     "student": "1566976731",
-    "ts": "2025-09-23T16:14:57.216718",
+    "ts": "2025-09-12T16:35:25.997822",
+    "type": "class_cancelled"
+  },
+  {
+    "date": "2025-09-30T11:00:00+07:00",
+    "note": "admin confirm cancel",
+    "status": "cancelled (early)",
+    "student": "1566976731"
+  },
+  {
+    "at": "2025-09-12T12:15:00+07:00",
+    "student": "868930626",
+    "ts": "2025-09-12T16:37:34.448118",
     "type": "class_completed"
   },
   {
-    "at": "2025-09-18T18:00:00+07:00",
-    "date": "2025-09-18T18:00:00+07:00",
-    "status": "completed",
-    "student": "446785918",
-    "ts": "2025-09-23T16:29:24.899047",
-    "type": "class_completed"
+    "admin": 1566976731,
+    "date": "2025-09-13T00:18:36.197214+07:00",
+    "note": "slot 0 Tuesday 11:00->Tuesday 13:00",
+    "status": "pattern_updated",
+    "student": "1566976731"
   },
   {
-    "at": "2025-09-23T12:30:00+07:00",
-    "date": "2025-09-23T12:30:00+07:00",
-    "status": "completed",
-    "student": "468212483",
-    "ts": "2025-09-23T16:30:23.995596",
-    "type": "class_completed"
+    "at": "2025-09-15T13:00:00+07:00",
+    "is_late": false,
+    "student": "742242",
+    "ts": "2025-09-13T17:34:05.195989",
+    "type": "class_cancelled"
   },
   {
-    "at": "2025-09-23T14:00:00+07:00",
-    "date": "2025-09-23T14:00:00+07:00",
-    "status": "completed",
-    "student": "325871233",
-    "ts": "2025-09-23T16:30:47.226166",
-    "type": "class_completed"
+    "at": "2025-09-15T12:00:00+07:00",
+    "is_late": false,
+    "student": "365509656",
+    "ts": "2025-09-14T11:56:30.052175",
+    "type": "class_cancelled"
   },
   {
     "new_value": false,
-    "student": "76032708",
-    "ts": "2025-09-23T16:47:46.356446",
+    "student": "883527125",
+    "ts": "2025-09-15T02:22:52.983277",
     "type": "pause_toggled"
   },
   {
-    "at": "2025-09-22T13:00:00+07:00",
-    "date": "2025-09-22T13:00:00+07:00",
-    "status": "completed",
-    "student": "742242",
-    "ts": "2025-09-23T16:48:47.342158",
+    "at": "2025-09-15T10:00:00+07:00",
+    "student": "446785918",
+    "ts": "2025-09-15T04:04:09.273941",
     "type": "class_completed"
   },
   {
     "at": "2025-09-15T13:00:00+07:00",
-    "date": "2025-09-15T13:00:00+07:00",
-    "status": "completed",
     "student": "742242",
-    "ts": "2025-09-23T16:48:58.985156",
+    "ts": "2025-09-15T08:22:24.157618",
     "type": "class_completed"
   },
   {
-    "at": "2025-09-22T14:00:00+07:00",
-    "date": "2025-09-22T14:00:00+07:00",
-    "status": "completed",
+    "at": "2025-09-15T14:00:00+07:00",
     "student": "742242",
-    "ts": "2025-09-23T16:52:47.579586",
+    "ts": "2025-09-15T08:22:37.651794",
     "type": "class_completed"
   },
   {
-    "at": "2025-09-24T09:00:00+07:00",
-    "date": "2025-09-24T09:00:00+07:00",
-    "status": "completed",
+    "at": "2025-09-02T09:45:00+07:00",
+    "student": "883527125",
+    "ts": "2025-09-16T03:51:40.266991",
+    "type": "class_completed"
+  },
+  {
+    "at": "2025-09-16T14:00:00+07:00",
+    "student": "325871233",
+    "ts": "2025-09-16T08:02:17.657738",
+    "type": "class_completed"
+  },
+  {
+    "at": "2025-09-15T18:00:00+07:00",
     "student": "446785918",
-    "ts": "2025-09-24T03:30:35.351140",
+    "ts": "2025-09-16T11:59:00.821359",
     "type": "class_completed"
   },
   {
-    "date": "2025-09-26T12:15:00+07:00",
-    "note": "admin confirm cancel",
-    "status": "cancelled (early)",
-    "student": "868930626"
-  },
-  {
-    "at": "2025-09-24T11:15:00+07:00",
-    "date": "2025-09-24T11:15:00+07:00",
-    "status": "completed",
-    "student": "868930626",
-    "ts": "2025-09-24T08:10:52.936633",
+    "at": "2025-09-16T18:00:00+07:00",
+    "student": "446785918",
+    "ts": "2025-09-16T11:59:14.753709",
     "type": "class_completed"
   },
   {
-    "at": "2025-09-24T12:30:00+07:00",
-    "date": "2025-09-24T12:30:00+07:00",
-    "status": "completed",
-    "student": "468212483",
-    "ts": "2025-09-24T08:14:24.209298",
+    "at": "2025-09-11T16:45:00+07:00",
+    "student": "408026385",
+    "ts": "2025-09-16T16:35:33.333696",
     "type": "class_completed"
   },
   {
     "admin": 1566976731,
-    "date": "2025-09-24T15:15:16.383896+07:00",
-    "note": "slot 1 Wednesday 14:00->Thursday 14:00",
+    "date": "2025-09-17T00:58:00.117465+07:00",
+    "note": "slot 4 Wednesday 10:00->Wednesday 09:00",
     "status": "pattern_updated",
-    "student": "325871233"
+    "student": "446785918"
   },
   {
     "admin": 1566976731,
-    "date": "2025-09-24T15:15:49.003854+07:00",
-    "note": "slot 2 Wednesday 15:00->Thursday 15:00",
-    "status": "pattern_updated",
-    "student": "325871233"
-  },
-  {
-    "at": "2025-09-24T18:00:00+07:00",
-    "date": "2025-09-24T18:00:00+07:00",
-    "status": "completed",
-    "student": "446785918",
-    "ts": "2025-09-24T13:08:28.070798",
-    "type": "class_completed"
-  },
-  {
-    "date": "2025-09-26T11:00:00+07:00",
-    "note": "admin confirm cancel",
-    "status": "cancelled (early)",
-    "student": "365509656"
-  },
-  {
-    "at": "2025-09-25T12:30:00+07:00",
-    "date": "2025-09-25T12:30:00+07:00",
-    "status": "completed",
-    "student": "468212483",
-    "ts": "2025-09-25T07:22:53.101104",
-    "type": "class_completed"
-  },
-  {
-    "at": "2025-09-25T11:00:00+07:00",
-    "date": "2025-09-25T11:00:00+07:00",
-    "status": "completed",
-    "student": "76032708",
-    "ts": "2025-09-25T07:23:25.634137",
-    "type": "class_completed"
-  },
-  {
-    "date": "2025-09-25T16:09:57.089130+07:00",
-    "note": "admin award free credit",
-    "status": "free_credit_awarded",
-    "student": "365509656"
-  },
-  {
-    "date": "2025-09-25T16:10:26.435283+07:00",
-    "note": "admin award free credit",
-    "status": "free_credit_awarded",
-    "student": "408026385"
-  },
-  {
-    "date": "2025-09-25T16:12:56.772993+07:00",
-    "note": "admin award free credit",
-    "status": "free_credit_awarded",
+    "date": "2025-09-17T01:04:09.173521+07:00",
+    "note": "admin used class credit for adhoc/extra hour",
+    "status": "adhoc_class_used",
     "student": "1566976731"
   },
   {
-    "at": "2025-09-25T18:00:00+07:00",
-    "date": "2025-09-25T18:00:00+07:00",
-    "status": "completed",
+    "at": "2025-09-15T12:00:00+07:00",
+    "is_late": true,
+    "student": "365509656",
+    "ts": "2025-09-16T18:07:25.588534",
+    "type": "class_cancelled"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-17T01:08:33.908899+07:00",
+    "note": "admin used class credit for adhoc/extra hour",
+    "status": "adhoc_class_used",
+    "student": "1566976731"
+  },
+  {
+    "at": "2025-09-12T01:00:00+07:00",
+    "is_late": true,
+    "student": "76032708",
+    "ts": "2025-09-16T18:24:49.345488",
+    "type": "class_cancelled"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-17T02:31:51.817692+07:00",
+    "note": "admin used class credit for adhoc/extra hour",
+    "status": "adhoc_class_used",
+    "student": "1566976731"
+  },
+  {
+    "at": "2025-09-17T09:00:00+07:00",
     "student": "446785918",
-    "ts": "2025-09-25T12:42:08.677601",
+    "ts": "2025-09-17T03:05:22.623237",
+    "type": "class_completed"
+  },
+  {
+    "at": "2025-09-17T11:15:00+07:00",
+    "student": "868930626",
+    "ts": "2025-09-17T05:19:17.046725",
+    "type": "class_completed"
+  },
+  {
+    "at": "2025-09-17T14:00:00+07:00",
+    "student": "325871233",
+    "ts": "2025-09-17T12:00:31.576589",
+    "type": "class_completed"
+  },
+  {
+    "at": "2025-09-17T15:00:00+07:00",
+    "student": "325871233",
+    "ts": "2025-09-17T12:00:42.728343",
+    "type": "class_completed"
+  },
+  {
+    "at": "2025-09-17T18:00:00+07:00",
+    "student": "446785918",
+    "ts": "2025-09-17T12:01:12.200187",
+    "type": "class_completed"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-17T19:01:36.844643+07:00",
+    "note": "admin used class credit for adhoc/extra hour",
+    "status": "adhoc_class_used",
+    "student": "446785918"
+  },
+  {
+    "at": "2025-09-17T13:00:00+07:00",
+    "student": "742242",
+    "ts": "2025-09-17T12:34:58.507153",
+    "type": "class_completed"
+  },
+  {
+    "at": "2025-09-17T14:00:00+07:00",
+    "student": "742242",
+    "ts": "2025-09-17T12:35:08.691640",
+    "type": "class_completed"
+  },
+  {
+    "admin": 1566976731,
+    "date": "2025-09-17T19:36:30.538534+07:00",
+    "note": "slot 3 Thursday 14:00->Friday 14:00",
+    "status": "pattern_updated",
+    "student": "325871233"
+  },
+  {
+    "new_value": true,
+    "student": "76032708",
+    "ts": "2025-09-18T01:59:06.583293",
+    "type": "pause_toggled"
+  },
+  {
+    "at": "2025-09-12T11:00:00+07:00",
+    "is_late": true,
+    "student": "76032708",
+    "ts": "2025-09-18T01:59:46.270098",
+    "type": "class_cancelled"
+  },
+  {
+    "at": "2025-08-28T09:45:00+07:00",
+    "student": "883527125",
+    "ts": "2025-09-18T03:53:04.650083",
     "type": "class_completed"
   }
 ]
