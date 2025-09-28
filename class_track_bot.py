@@ -3324,9 +3324,58 @@ async def confirm_cancel_for_student(
         )
         log_status = "cancelled (premium)"
     elif cancel_type == "early":
-        student["reschedule_credit"] = student.get("reschedule_credit", 0) + 1
+        class_dates = student.get("class_dates", [])
+        if class_time_str in class_dates:
+            class_dates.remove(class_time_str)
+        else:
+            # Fallback for potential timezone-normalized entries
+            try:
+                cancelled_dt = ensure_bangkok(class_time_str)
+            except Exception:
+                cancelled_dt = None
+            if cancelled_dt is not None:
+                for existing in list(class_dates):
+                    try:
+                        existing_dt = ensure_bangkok(existing)
+                    except Exception:
+                        continue
+                    if existing_dt == cancelled_dt:
+                        class_dates.remove(existing)
+                        break
+
+        remaining: List[datetime] = []
+        for item in class_dates:
+            try:
+                remaining.append(ensure_bangkok(item))
+            except Exception:
+                continue
+
+        if remaining:
+            max_date = max(remaining)
+        else:
+            try:
+                max_date = ensure_bangkok(class_time_str)
+            except Exception:
+                max_date = None
+        schedule_pattern = student.get("schedule_pattern", "")
+        if schedule_pattern and max_date is not None:
+            cycle_weeks = student.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
+            generated = parse_schedule(
+                schedule_pattern,
+                start_date=max_date.date(),
+                cycle_weeks=cycle_weeks,
+            )
+            for candidate in generated:
+                try:
+                    candidate_dt = ensure_bangkok(candidate)
+                except Exception:
+                    continue
+                if candidate_dt > max_date:
+                    class_dates.append(candidate_dt.isoformat())
+                    break
+
         response = (
-            f"Cancellation confirmed for {student['name']}. Reschedule credit added."
+            f"Cancellation confirmed for {student['name']}. Replacement class scheduled automatically."
         )
         log_status = "cancelled (early)"
     else:
