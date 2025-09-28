@@ -47,7 +47,7 @@ except ImportError:
 
 import inspect
 from datetime import datetime, timedelta, time, date, timezone
-from typing import Dict, Any, List, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional, Tuple, Union, Set
 
 from telegram import (
     Update,
@@ -802,6 +802,38 @@ def next_occurrence(day_time_str: str, now: datetime) -> datetime:
     except Exception:
         # If parsing fails just return now + 1 hour as fallback
         return now + timedelta(hours=1)
+
+
+def get_admin_future_classes(
+    student: Dict[str, Any], include_cancelled: bool = False
+) -> List[str]:
+    """Return ``class_dates`` for admin views with optional cancelled filtering."""
+
+    class_dates = student.get("class_dates", [])
+    if not isinstance(class_dates, list):
+        return []
+
+    cancelled: Set[str] = set()
+    if not include_cancelled:
+        raw_cancelled = student.get("cancelled_dates", [])
+        if isinstance(raw_cancelled, list):
+            cancelled = {str(item) for item in raw_cancelled if item}
+
+    filtered: List[str] = []
+    for item in class_dates:
+        if not item:
+            continue
+        if isinstance(item, str):
+            dt_str = item
+        elif hasattr(item, "isoformat"):
+            dt_str = item.isoformat()
+        else:
+            dt_str = str(item)
+        if not include_cancelled and dt_str in cancelled:
+            continue
+        filtered.append(dt_str)
+
+    return sorted(filtered)
 
 
 def get_student_visible_classes(student: Dict[str, Any], count: int = 5) -> List[datetime]:

@@ -2,12 +2,17 @@ from typing import Dict, Any, Tuple
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 try:  # pragma: no cover - circular import guard during module init
-    from class_track_bot import fmt_bkk
+    from class_track_bot import fmt_bkk, get_admin_future_classes
 except ImportError:  # pragma: no cover
     def fmt_bkk(dt, add_label: bool = False):
         from class_track_bot import fmt_bkk as _fmt_bkk
 
         return _fmt_bkk(dt, add_label=add_label)
+
+    def get_admin_future_classes(student, include_cancelled: bool = False):
+        from class_track_bot import get_admin_future_classes as _helper
+
+        return _helper(student, include_cancelled=include_cancelled)
 
 
 def build_student_submenu(student_id: str) -> InlineKeyboardMarkup:
@@ -53,7 +58,7 @@ def build_student_detail_view(student_id: str, student: Dict[str, Any]) -> Tuple
     remaining = student.get("classes_remaining", 0)
 
     # Upcoming class dates – show at most the next three entries
-    class_dates = sorted(student.get("class_dates", []))
+    class_dates = get_admin_future_classes(student, include_cancelled=False)
     upcoming = class_dates[:3]
 
     paused = student.get("paused", False)

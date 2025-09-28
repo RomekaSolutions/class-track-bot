@@ -19,9 +19,25 @@ from helpers import (
 
 
 try:
-    from class_track_bot import BASE_TZ  # type: ignore
+    from class_track_bot import BASE_TZ, get_admin_future_classes  # type: ignore
 except Exception:  # pragma: no cover - fallback for circular import during init
     BASE_TZ = timezone(timedelta(hours=7))
+
+    def get_admin_future_classes(student, include_cancelled: bool = False):
+        class_dates = student.get("class_dates", [])
+        if not isinstance(class_dates, list):
+            return []
+        if include_cancelled:
+            return sorted(str(item) for item in class_dates if item)
+        cancelled = student.get("cancelled_dates", [])
+        if not isinstance(cancelled, list):
+            cancelled = []
+        cancelled_set = {str(item) for item in cancelled if item}
+        return sorted(
+            str(item)
+            for item in class_dates
+            if item and str(item) not in cancelled_set
+        )
 
 STUDENT_NOT_FOUND_MSG = (
     "❌ This student was not found — they may have been removed or renamed."
@@ -74,7 +90,7 @@ def get_admin_visible_classes(
     logs = data_store.load_logs()
     now = datetime.now(timezone.utc)
     visible: List[str] = []
-    for dt in sorted(student.get("class_dates", [])):
+    for dt in get_admin_future_classes(student, include_cancelled=True):
         try:
             aware = _parse_iso(dt)
         except Exception:
@@ -95,7 +111,7 @@ def get_admin_upcoming_classes(
     logs = data_store.load_logs()
     now = datetime.now(timezone.utc)
     dates: List[str] = []
-    for dt in sorted(student.get("class_dates", [])):
+    for dt in get_admin_future_classes(student, include_cancelled=False):
         try:
             aware = _parse_iso(dt)
         except Exception:
