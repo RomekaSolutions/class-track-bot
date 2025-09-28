@@ -324,7 +324,13 @@ def get_last_class(student: Dict[str, Any]):
     class_dates = student.get("class_dates")
     if not class_dates:
         return None
-    dates = [_parse_iso(x) for x in class_dates if x]
+    cancelled_dates = set(student.get("cancelled_dates", []))
+    filtered_dates = [
+        dt_str for dt_str in class_dates if dt_str and dt_str not in cancelled_dates
+    ]
+    if not filtered_dates:
+        return None
+    dates = [_parse_iso(x) for x in filtered_dates]
     return max(dates) if dates else None
 
 # Weekday helpers used throughout scheduling utilities
