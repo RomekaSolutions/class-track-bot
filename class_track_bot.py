@@ -1055,6 +1055,8 @@ async def send_low_balance_if_threshold(app: Application, student_key: str, stud
 
 def schedule_final_set_notice(app: Application, student_key: str, student: Dict[str, Any], offset: timedelta = timedelta(hours=1)) -> None:
     """Schedule a notice before the final class in the current set."""
+    if is_premium(student):
+        return
     if not student.get("telegram_mode", True):
         return
     last_class = get_last_class(student)
