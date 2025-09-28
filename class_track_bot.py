@@ -2236,8 +2236,11 @@ def generate_dashboard_summary() -> str:
         if student.get("paused"):
             paused_students.append(student["name"])
         else:
+            cancelled_dates = set(student.get("cancelled_dates", []))
             for dt_str in student.get("class_dates", []):
                 if not dt_str:
+                    continue
+                if dt_str in cancelled_dates:
                     continue
                 try:
                     class_dt = parse_student_datetime(dt_str, student)
