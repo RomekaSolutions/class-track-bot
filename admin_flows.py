@@ -108,6 +108,20 @@ async def safe_edit_or_send(target, text: str, reply_markup=None) -> None:
         await target.reply_text(text, reply_markup=reply_markup)
 
 
+async def try_ack(query, *, text=None, show_alert=False) -> bool:
+    """Attempt callback acknowledgment, return success status."""
+
+    try:
+        await query.answer(text=text, show_alert=show_alert)
+        return True
+    except BadRequest as exc:
+        logging.info("Callback ack failed (continuing): %s", exc)
+        return False
+    except TypeError as exc:
+        logging.debug("Ack signature mismatch: %s", exc)
+        return False
+
+
 async def _answer_with_alert(query, text: str) -> None:
     """Safely answer a callback with ``show_alert`` when supported."""
 
@@ -535,31 +549,43 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     if not query:
         return
+    acked = await try_ack(query)
     data = query.data or ""
     match = re.match(r"^cfm:RENEW:([^:]+):(\d+)$", data)
     if not match:
         logging.warning("Malformed renew confirmation callback: %s", data)
-        await _answer_with_alert(query, "Invalid renewal request.")
+        if acked:
+            await _answer_with_alert(query, "Invalid renewal request.")
+        else:
+            await safe_edit_or_send(query, "Invalid renewal request.")
         return
     raw_student, qty_str = match.groups()
     try:
         qty = int(qty_str)
     except ValueError:
         logging.warning("Invalid renewal quantity in callback: %s", data)
-        await _answer_with_alert(query, "Invalid renewal request.")
+        if acked:
+            await _answer_with_alert(query, "Invalid renewal request.")
+        else:
+            await safe_edit_or_send(query, "Invalid renewal request.")
         return
     if qty <= 0:
         logging.warning("Non-positive renewal quantity for callback: %s", data)
-        await _answer_with_alert(query, "Invalid renewal request.")
+        if acked:
+            await _answer_with_alert(query, "Invalid renewal request.")
+        else:
+            await safe_edit_or_send(query, "Invalid renewal request.")
         return
     students = data_store.load_students()
     student_id, student = resolve_student(students, raw_student)
     if not student:
         logging.warning("Unable to resolve student %s for renewal confirmation", raw_student)
-        await _answer_with_alert(query, "Student not found")
+        if acked:
+            await _answer_with_alert(query, "Student not found")
+        else:
+            await safe_edit_or_send(query, "Student not found")
         return
     student_id = str(student_id)
-    await query.answer()
     if not _is_cycle_finished(student):
         text, markup = keyboard_builders.build_student_detail_view(student_id, student)
         await safe_edit_or_send(
@@ -794,26 +820,36 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     if not query:
         return
+    acked = await try_ack(query)
     data = query.data or ""
     match = re.match(r"^cls:(LOG|CANCEL|RESHED):([^:]+):(.+)$", data)
     if not match:
         logging.warning("Malformed class selection callback: %s", data)
-        await _answer_with_alert(query, "Invalid selection")
+        if acked:
+            await _answer_with_alert(query, "Invalid selection")
+        else:
+            await safe_edit_or_send(query, "Invalid selection")
         return
     action, raw_student, iso_dt = match.groups()
     students = data_store.load_students()
     student_id, student = resolve_student(students, raw_student)
     if not student:
         logging.warning("Unable to resolve student %s for class selection", raw_student)
-        await _answer_with_alert(query, "Student not found")
+        if acked:
+            await _answer_with_alert(query, "Student not found")
+        else:
+            await safe_edit_or_send(query, "Student not found")
         return
     student_id = str(student_id)
     if iso_dt not in student.get("class_dates", []):
-        await query.answer()
-        await safe_edit_or_send(query, "Class not found.", reply_markup=_back_markup(student_id))
+        if acked:
+            await _answer_with_alert(query, "Class not found.")
+        else:
+            await safe_edit_or_send(
+                query, "Class not found.", reply_markup=_back_markup(student_id)
+            )
         return
 
-    await query.answer()
     if action == "LOG":
         has_log = data_store.is_class_logged(student_id, iso_dt)
         buttons = [
@@ -891,22 +927,27 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     if not query:
         return
+    acked = await try_ack(query)
     data = query.data or ""
     match = re.match(r"^cfm:(CANCEL|RESHED):([^:]+):(.+)$", data)
     if not match:
         logging.warning("Malformed class confirmation callback: %s", data)
-        await _answer_with_alert(query, "Invalid confirmation")
+        if acked:
+            await _answer_with_alert(query, "Invalid confirmation")
+        else:
+            await safe_edit_or_send(query, "Invalid confirmation")
         return
     action, raw_student, payload = match.groups()
     students = data_store.load_students()
     student_id, student = resolve_student(students, raw_student)
     if not student:
         logging.warning("Unable to resolve student %s for class confirmation", raw_student)
-        await _answer_with_alert(query, "Student not found")
+        if acked:
+            await _answer_with_alert(query, "Student not found")
+        else:
+            await safe_edit_or_send(query, "Student not found")
         return
     student_id = str(student_id)
-
-    await query.answer()
 
 
     if action == "CANCEL":
@@ -978,6 +1019,7 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     if not query:
         return
+    acked = await try_ack(query)
     data = query.data or ""
     match = re.match(
         r"^log:(COMPLETE|CANCEL_EARLY|CANCEL_LATE|RESCHEDULED|UNLOG):([^:]+):(.+)$",
@@ -985,18 +1027,22 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     if not match:
         logging.warning("Malformed log action callback: %s", data)
-        await _answer_with_alert(query, "Invalid log action")
+        if acked:
+            await _answer_with_alert(query, "Invalid log action")
+        else:
+            await safe_edit_or_send(query, "Invalid log action")
         return
     action, raw_student, iso_dt = match.groups()
     students = data_store.load_students()
     student_id, student = resolve_student(students, raw_student)
     if not student:
         logging.warning("Unable to resolve student %s for log action", raw_student)
-        await _answer_with_alert(query, "Student not found")
+        if acked:
+            await _answer_with_alert(query, "Student not found")
+        else:
+            await safe_edit_or_send(query, "Student not found")
         return
     student_id = str(student_id)
-
-    await query.answer()
 
     if action == "UNLOG":
         removed = data_store.remove_class_log(student_id, iso_dt)
