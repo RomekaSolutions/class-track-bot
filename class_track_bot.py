@@ -2546,18 +2546,45 @@ async def confirm_pending_callback(update: Update, context: ContextTypes.DEFAULT
     """One-tap confirmation of pending cancellations."""
 
     query = update.callback_query
-    student_id = query.data.split(":", 1)[1]
+    if not query:
+        return
+    data = query.data or ""
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    async def answer_alert(message: str) -> None:
+        try:
+            await query.answer(message, show_alert=True)
+        except TypeError:
+            try:
+                await query.answer(message)
+            except TypeError:
+                await query.answer()
+    try:
+        _, raw_student = data.split(":", 1)
+    except ValueError:
+        logging.warning("Malformed confirm pending callback: %s", data)
+        await answer_alert("Invalid request")
+        return
     students = load_students()
-    student = students.get(student_id)
-    if not student or not student.get("pending_cancel"):
-        await query.answer("Nothing pending for this student.", show_alert=True)
+    student_id, student = resolve_student(students, raw_student)
+    if not student:
+        logging.warning("Unable to resolve student %s for pending confirmation", raw_student)
+        await answer_alert("Student not found")
+        await admin_pending_callback(update, context)
+        return
+    student_id = str(student_id)
+    student = students.get(student_id, student)
+    if not student.get("pending_cancel"):
+        await answer_alert("Nothing pending for this student.")
         await admin_pending_callback(update, context)
         return
 
     try:
         await confirm_cancel_for_student(context, students, student_id, student)
     except ValueError as exc:
-        await query.answer(str(exc), show_alert=True)
+        await answer_alert(str(exc))
         await admin_pending_callback(update, context)
         return
 
@@ -5330,7 +5357,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(debug_ping_callback, pattern="^__ping__$"))
     application.add_handler(CallbackQueryHandler(admin_pending_callback, pattern=r"^admin_pending$"))
     application.add_handler(
-        CallbackQueryHandler(confirm_pending_callback, pattern=r"^confirm_pending:(\d+)$")
+        CallbackQueryHandler(confirm_pending_callback, pattern=r"^confirm_pending:([^:]+)$")
     )
     application.add_handler(
         CallbackQueryHandler(
