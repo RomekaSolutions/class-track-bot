@@ -6,6 +6,14 @@ from typing import Dict, Any, Callable, List, Optional, Tuple
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+try:
+    from telegram.error import BadRequest
+except Exception:  # pragma: no cover - fallback when telegram is unavailable
+
+    class BadRequest(Exception):
+        """Fallback BadRequest exception for optional telegram dependency."""
+
+
 import data_store
 import keyboard_builders
 from data_store import load_logs, save_logs, save_students
@@ -103,13 +111,28 @@ async def safe_edit_or_send(target, text: str, reply_markup=None) -> None:
 async def _answer_with_alert(query, text: str) -> None:
     """Safely answer a callback with ``show_alert`` when supported."""
 
-    try:
-        await query.answer(text, show_alert=True)
-    except TypeError:
+    async def _answer_without_alert() -> None:
         try:
             await query.answer(text)
         except TypeError:
-            await query.answer()
+            try:
+                await query.answer()
+            except TypeError as exc:  # pragma: no cover - unexpected signature
+                logging.warning("Failed to answer callback (no-arg TypeError): %s", exc)
+            except BadRequest as exc:  # pragma: no cover - depends on telegram
+                logging.warning("Failed to answer callback (no-arg): %s", exc)
+                await safe_edit_or_send(query, text)
+        except BadRequest as exc:  # pragma: no cover - depends on telegram
+            logging.warning("Failed to answer callback (text): %s", exc)
+            await safe_edit_or_send(query, text)
+
+    try:
+        await query.answer(text, show_alert=True)
+    except TypeError:
+        await _answer_without_alert()
+    except BadRequest as exc:  # pragma: no cover - depends on telegram
+        logging.warning("Failed to answer callback with alert: %s", exc)
+        await safe_edit_or_send(query, text)
 
 
 def _back_markup(student_id: str) -> InlineKeyboardMarkup:
@@ -513,20 +536,20 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not query:
         return
     data = query.data or ""
-    try:
-        await query.answer()
-    except Exception:
-        pass
-    try:
-        match = re.match(r"^cfm:RENEW:([^:]+):(\d+)$", data)
-        if not match:
-            return
-        raw_student, qty_str = match.groups()
-        qty = int(qty_str)
-        if qty <= 0:
-            raise ValueError
-    except Exception:
+    match = re.match(r"^cfm:RENEW:([^:]+):(\d+)$", data)
+    if not match:
         logging.warning("Malformed renew confirmation callback: %s", data)
+        await _answer_with_alert(query, "Invalid renewal request.")
+        return
+    raw_student, qty_str = match.groups()
+    try:
+        qty = int(qty_str)
+    except ValueError:
+        logging.warning("Invalid renewal quantity in callback: %s", data)
+        await _answer_with_alert(query, "Invalid renewal request.")
+        return
+    if qty <= 0:
+        logging.warning("Non-positive renewal quantity for callback: %s", data)
         await _answer_with_alert(query, "Invalid renewal request.")
         return
     students = data_store.load_students()
@@ -536,6 +559,7 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _answer_with_alert(query, "Student not found")
         return
     student_id = str(student_id)
+    await query.answer()
     if not _is_cycle_finished(student):
         text, markup = keyboard_builders.build_student_detail_view(student_id, student)
         await safe_edit_or_send(
@@ -771,19 +795,12 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
     if not query:
         return
     data = query.data or ""
-    try:
-        await query.answer()
-    except Exception:
-        pass
-    try:
-        match = re.match(r"^cls:(LOG|CANCEL|RESHED):([^:]+):(.+)$", data)
-        if not match:
-            return
-        action, raw_student, iso_dt = match.groups()
-    except Exception:
+    match = re.match(r"^cls:(LOG|CANCEL|RESHED):([^:]+):(.+)$", data)
+    if not match:
         logging.warning("Malformed class selection callback: %s", data)
         await _answer_with_alert(query, "Invalid selection")
         return
+    action, raw_student, iso_dt = match.groups()
     students = data_store.load_students()
     student_id, student = resolve_student(students, raw_student)
     if not student:
@@ -792,9 +809,11 @@ async def handle_class_selection(update: Update, context: ContextTypes.DEFAULT_T
         return
     student_id = str(student_id)
     if iso_dt not in student.get("class_dates", []):
+        await query.answer()
         await safe_edit_or_send(query, "Class not found.", reply_markup=_back_markup(student_id))
         return
 
+    await query.answer()
     if action == "LOG":
         has_log = data_store.is_class_logged(student_id, iso_dt)
         buttons = [
@@ -873,19 +892,12 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
     if not query:
         return
     data = query.data or ""
-    try:
-        await query.answer()
-    except Exception:
-        pass
-    try:
-        match = re.match(r"^cfm:(CANCEL|RESHED):([^:]+):(.+)$", data)
-        if not match:
-            return
-        action, raw_student, payload = match.groups()
-    except Exception:
+    match = re.match(r"^cfm:(CANCEL|RESHED):([^:]+):(.+)$", data)
+    if not match:
         logging.warning("Malformed class confirmation callback: %s", data)
         await _answer_with_alert(query, "Invalid confirmation")
         return
+    action, raw_student, payload = match.groups()
     students = data_store.load_students()
     student_id, student = resolve_student(students, raw_student)
     if not student:
@@ -893,6 +905,8 @@ async def handle_class_confirmation(update: Update, context: ContextTypes.DEFAUL
         await _answer_with_alert(query, "Student not found")
         return
     student_id = str(student_id)
+
+    await query.answer()
 
 
     if action == "CANCEL":
@@ -965,22 +979,15 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not query:
         return
     data = query.data or ""
-    try:
-        await query.answer()
-    except Exception:
-        pass
-    try:
-        match = re.match(
-            r"^log:(COMPLETE|CANCEL_EARLY|CANCEL_LATE|RESCHEDULED|UNLOG):([^:]+):(.+)$",
-            data,
-        )
-        if not match:
-            return
-        action, raw_student, iso_dt = match.groups()
-    except Exception:
+    match = re.match(
+        r"^log:(COMPLETE|CANCEL_EARLY|CANCEL_LATE|RESCHEDULED|UNLOG):([^:]+):(.+)$",
+        data,
+    )
+    if not match:
         logging.warning("Malformed log action callback: %s", data)
         await _answer_with_alert(query, "Invalid log action")
         return
+    action, raw_student, iso_dt = match.groups()
     students = data_store.load_students()
     student_id, student = resolve_student(students, raw_student)
     if not student:
@@ -988,6 +995,8 @@ async def handle_log_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await _answer_with_alert(query, "Student not found")
         return
     student_id = str(student_id)
+
+    await query.answer()
 
     if action == "UNLOG":
         removed = data_store.remove_class_log(student_id, iso_dt)
