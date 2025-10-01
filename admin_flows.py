@@ -19,7 +19,12 @@ from helpers import (
 
 
 try:
-    from class_track_bot import BASE_TZ, get_admin_future_classes  # type: ignore
+    from class_track_bot import (
+        BASE_TZ,
+        get_admin_future_classes,
+        parse_day_time,
+        WEEKDAY_MAP,
+    )  # type: ignore
 except Exception:  # pragma: no cover - fallback for circular import during init
     BASE_TZ = timezone(timedelta(hours=7))
 
@@ -38,6 +43,35 @@ except Exception:  # pragma: no cover - fallback for circular import during init
             for item in class_dates
             if item and str(item) not in cancelled_set
         )
+
+    WEEKDAY_NAMES = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]
+    WEEKDAY_MAP = {name.lower(): idx for idx, name in enumerate(WEEKDAY_NAMES)}
+
+    def parse_day_time(text: str):
+        if not isinstance(text, str):
+            return None
+        parts = text.strip().split()
+        if len(parts) != 2:
+            return None
+        day_raw, time_raw = parts
+        weekday_idx = WEEKDAY_MAP.get(day_raw.lower())
+        if weekday_idx is None:
+            return None
+        try:
+            hour, minute = map(int, time_raw.split(":"))
+        except ValueError:
+            return None
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return f"{WEEKDAY_NAMES[weekday_idx]} {hour:02d}:{minute:02d}"
 
 STUDENT_NOT_FOUND_MSG = (
     "❌ This student was not found — they may have been removed or renamed."
@@ -276,6 +310,49 @@ def _history_and_pattern(
 ) -> Tuple[List[datetime], Optional[List[Slot]]]:
     """Return class history and detected weekly pattern for ``student_id``."""
 
+    student = data_store.get_student_by_id(student_id)
+    schedule_slots: Optional[List[Slot]] = None
+    if student:
+        raw_pattern = student.get("schedule_pattern")
+        entries: List[str] = []
+        if isinstance(raw_pattern, str):
+            entries = [item.strip() for item in raw_pattern.split(",") if item.strip()]
+        elif isinstance(raw_pattern, list):
+            entries = [str(item).strip() for item in raw_pattern if str(item).strip()]
+        if entries:
+            slots: List[Slot] = []
+            seen = set()
+            invalid_entry: Optional[str] = None
+            for entry in entries:
+                normalized = parse_day_time(entry)
+                if not normalized:
+                    invalid_entry = entry
+                    break
+                day_name, time_part = normalized.split()
+                weekday_idx = WEEKDAY_MAP.get(day_name.lower())
+                if weekday_idx is None:
+                    invalid_entry = entry
+                    break
+                try:
+                    hour, minute = map(int, time_part.split(":"))
+                except ValueError:
+                    invalid_entry = entry
+                    break
+                key = (weekday_idx, hour, minute, BASE_TZ)
+                if key not in seen:
+                    seen.add(key)
+                    slots.append(key)
+            if invalid_entry:
+                logging.warning(
+                    "Invalid schedule_pattern entry '%s' for student %s: %s",
+                    invalid_entry,
+                    student_id,
+                    raw_pattern,
+                )
+            elif slots:
+                slots.sort(key=lambda x: (x[0], x[1], x[2]))
+                schedule_slots = slots
+
     logs = data_store.load_logs()
     history: List[datetime] = []
     for event in logs:
@@ -296,17 +373,18 @@ def _history_and_pattern(
             except Exception:
                 continue
     history.sort()
+    if schedule_slots is not None:
+        return history, schedule_slots
+
     pattern = get_weekly_pattern_from_history(history)
-    if not pattern:
-        student = data_store.get_student_by_id(student_id)
-        if student and isinstance(student.get("class_dates"), list):
-            dates: List[datetime] = []
-            for iso in student.get("class_dates", []):
-                try:
-                    dates.append(_parse_iso(iso))
-                except Exception:
-                    continue
-            pattern = get_weekly_pattern_from_history(dates)
+    if not pattern and student and isinstance(student.get("class_dates"), list):
+        dates: List[datetime] = []
+        for iso in student.get("class_dates", []):
+            try:
+                dates.append(_parse_iso(iso))
+            except Exception:
+                continue
+        pattern = get_weekly_pattern_from_history(dates)
     return history, pattern
 
 
@@ -477,17 +555,25 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         }
     )
 
-    from class_track_bot import (
-        schedule_student_reminders,
-        send_low_balance_if_threshold,
-        schedule_final_set_notice,
-    )
-    # In test contexts, ContextTypes.DEFAULT_TYPE may be a dummy without .application
-    if not hasattr(context, "application"):
-        return
-    schedule_student_reminders(context.application, student_id, stu)
-    await send_low_balance_if_threshold(context.application, student_id, stu)
-    schedule_final_set_notice(context.application, student_id, stu)
+    try:
+        from class_track_bot import (
+            schedule_student_reminders,
+            send_low_balance_if_threshold,
+            schedule_final_set_notice,
+        )
+    except Exception as exc:  # pragma: no cover - only triggered in test stubs
+        logging.warning(
+            "Skipping reminder scheduling for %s due to import error: %s",
+            student_id,
+            exc,
+        )
+    else:
+        # In test contexts, ContextTypes.DEFAULT_TYPE may be a dummy without .application
+        if not hasattr(context, "application"):
+            return
+        schedule_student_reminders(context.application, student_id, stu)
+        await send_low_balance_if_threshold(context.application, student_id, stu)
+        schedule_final_set_notice(context.application, student_id, stu)
 
     text, markup = keyboard_builders.build_student_detail_view(student_id, stu)
     msg = (
