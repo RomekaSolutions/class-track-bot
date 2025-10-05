@@ -911,7 +911,18 @@ def get_student_cancellable_classes(student: Dict[str, Any]) -> List[datetime]:
             continue
         results.append(dt)
     results.sort()
-    return results
+    if is_premium(student):
+        return results
+
+    remaining_raw = student.get("classes_remaining")
+    try:
+        remaining = int(remaining_raw)
+    except (TypeError, ValueError):
+        remaining = 0
+    if remaining < 0:
+        remaining = 0
+
+    return results[:remaining]
 
 
 def get_admin_visible_classes(

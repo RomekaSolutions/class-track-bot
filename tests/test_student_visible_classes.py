@@ -173,11 +173,11 @@ def test_student_visible_classes_premium_unlimited():
     assert visible == expected
 
 
-def test_student_cancellable_classes_ignores_remaining():
-    student, class_dates = _build_student(classes_remaining=0)
+def test_student_cancellable_classes_respects_remaining():
+    student, class_dates = _build_student(classes_remaining=1)
     cancellable = ctb.get_student_cancellable_classes(student)
-    assert len(cancellable) == len(class_dates)
-    expected = [ctb.ensure_bangkok(dt) for dt in class_dates]
+    assert len(cancellable) == 1
+    expected = [ctb.ensure_bangkok(dt) for dt in class_dates[:1]]
     assert cancellable == expected
 
 
