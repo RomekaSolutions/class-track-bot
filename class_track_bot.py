@@ -3340,89 +3340,56 @@ async def confirm_cancel_for_student(
     except Exception as exc:  # pragma: no cover - malformed time
         raise ValueError("Invalid class time format; cancellation not confirmed.") from exc
 
-    cancelled_dates = student.setdefault("cancelled_dates", [])
-    if class_time_str not in cancelled_dates:
-        cancelled_dates.append(class_time_str)
-
+    premium_student = is_premium(student)
     cancel_type = pending_cancel.get("type", "late")
-    if is_premium(student):
+    cutoff_hours = 99999 if premium_student else student.get("cutoff_hours", 24)
+    student_key_str = str(student_key)
+
+    cancelled = data_store.cancel_single_class(
+        student_key_str,
+        class_time_str,
+        cutoff_hours,
+        log=False,
+    )
+    if not cancelled:
+        raise ValueError("Class not found; cancellation not confirmed.")
+
+    students = data_store.load_students()
+    student = students.get(student_key_str)
+    if not student:
+        raise ValueError("Student record missing after cancellation.")
+
+    student.pop("pending_cancel", None)
+    ensure_future_class_dates(student)
+
+    if premium_student:
         response = (
             f"Cancellation confirmed for {student['name']}. (Premium — no deduction.)"
         )
         log_status = "cancelled (premium)"
     elif cancel_type == "early":
-        class_dates = student.get("class_dates", [])
-        if class_time_str in class_dates:
-            class_dates.remove(class_time_str)
-        else:
-            # Fallback for potential timezone-normalized entries
-            try:
-                cancelled_dt = ensure_bangkok(class_time_str)
-            except Exception:
-                cancelled_dt = None
-            if cancelled_dt is not None:
-                for existing in list(class_dates):
-                    try:
-                        existing_dt = ensure_bangkok(existing)
-                    except Exception:
-                        continue
-                    if existing_dt == cancelled_dt:
-                        class_dates.remove(existing)
-                        break
-
-        remaining: List[datetime] = []
-        for item in class_dates:
-            try:
-                remaining.append(ensure_bangkok(item))
-            except Exception:
-                continue
-
-        if remaining:
-            max_date = max(remaining)
-        else:
-            try:
-                max_date = ensure_bangkok(class_time_str)
-            except Exception:
-                max_date = None
-        schedule_pattern = student.get("schedule_pattern", "")
-        if schedule_pattern and max_date is not None:
-            cycle_weeks = student.get("cycle_weeks", DEFAULT_CYCLE_WEEKS)
-            generated = parse_schedule(
-                schedule_pattern,
-                start_date=max_date.date(),
-                cycle_weeks=cycle_weeks,
-            )
-            for candidate in generated:
-                try:
-                    candidate_dt = ensure_bangkok(candidate)
-                except Exception:
-                    continue
-                if candidate_dt > max_date:
-                    class_dates.append(candidate_dt.isoformat())
-                    break
-
         response = (
             f"Cancellation confirmed for {student['name']}. Replacement class scheduled automatically."
         )
         log_status = "cancelled (early)"
     else:
-        if student.get("classes_remaining", 0) > 0:
-            student["classes_remaining"] -= 1
         await maybe_send_balance_warning(getattr(context, "bot", None), student)
         response = (
             f"Cancellation confirmed for {student['name']}. One class deducted."
         )
         log_status = "missed (late cancel)"
 
-    student.pop("pending_cancel", None)
-    ensure_future_class_dates(student)
-    save_students(students)
+    data_store.save_students(students)
 
     # remove any scheduled reminder for this class and reschedule remaining
-    for job in context.application.job_queue.jobs():
-        if job.name == f"class_reminder:{student_key}:{class_time_str}":
-            job.schedule_removal()
-    schedule_student_reminders(context.application, student_key, student)
+    app = getattr(context, "application", None)
+    if app:
+        for job in app.job_queue.jobs():
+            if job.name == f"class_reminder:{student_key_str}:{class_time_str}":
+                job.schedule_removal()
+        schedule_student_reminders(app, student_key_str, student)
+        await send_low_balance_if_threshold(app, student_key_str, student)
+        schedule_final_set_notice(app, student_key_str, student)
 
     logs = load_logs()
     note = "admin confirm cancel"
@@ -3430,7 +3397,7 @@ async def confirm_cancel_for_student(
         note += " (premium)"
     logs.append(
         {
-            "student": student_key,
+            "student": student_key_str,
             "date": class_time_str,
             "status": log_status,
             "note": note,
@@ -3438,8 +3405,8 @@ async def confirm_cancel_for_student(
     )
     save_logs(logs)
 
-    await refresh_student_menu(student_key, student, getattr(context, "bot", None))
-    await refresh_student_my_classes(student_key, student, getattr(context, "bot", None))
+    await refresh_student_menu(student_key_str, student, getattr(context, "bot", None))
+    await refresh_student_my_classes(student_key_str, student, getattr(context, "bot", None))
 
     return response, class_time_str
 

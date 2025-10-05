@@ -4,6 +4,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
 
+from helpers import extract_weekly_pattern, generate_from_pattern
+
 STUDENTS_FILE = "students.json"
 LOGS_FILE = "logs.json"
 
@@ -434,40 +436,115 @@ def mark_class_completed(student_id: str, iso_dt: str) -> bool:
     return True
 
 
-def cancel_single_class(student_id: str, iso_dt: str, cutoff_hours: int) -> bool:
+def cancel_single_class(
+    student_id: str,
+    iso_dt: str,
+    cutoff_hours: int,
+    *,
+    log: bool = True,
+) -> bool:
     """Cancel a single class, applying late deduction logic."""
+
     data = load_students()
     stu = data.get(str(student_id))
     if not stu:
         return False
+
+    # Resolve the class time within the student's schedule
+    class_dates: List[str] = list(stu.get("class_dates", []))
+    target_iso: Optional[str] = None
+    if iso_dt in class_dates:
+        target_iso = iso_dt
+    else:
+        try:
+            target_dt = datetime.fromisoformat(iso_dt)
+        except Exception:
+            target_dt = None
+        if target_dt is not None:
+            for existing in class_dates:
+                try:
+                    existing_dt = datetime.fromisoformat(existing)
+                except Exception:
+                    continue
+                if existing_dt == target_dt:
+                    target_iso = existing
+                    break
+
+    cancelled = list(stu.get("cancelled_dates", []))
+    if target_iso is None and iso_dt not in cancelled:
+        return False
+
     # Use timezone-aware UTC so comparisons with aware class datetimes are valid
     now = datetime.now(timezone.utc)
-    class_time = datetime.fromisoformat(iso_dt)
-    # Normalize naive datetimes to UTC for safe comparisons in tests
+    try:
+        class_time = datetime.fromisoformat(target_iso or iso_dt)
+    except Exception:
+        class_time = datetime.fromisoformat(iso_dt)
     if class_time.tzinfo is None:
         class_time = class_time.replace(tzinfo=timezone.utc)
     is_late = now > class_time - timedelta(hours=cutoff_hours)
-    # Keep class_dates intact; track cancellations separately
-    dates = stu.get("class_dates", [])
-    stu["class_dates"] = dates
-    cancelled = stu.get("cancelled_dates", [])
-    cancelled.append(iso_dt)
+
+    if not is_late and target_iso is not None:
+        class_dates = [d for d in class_dates if d != target_iso]
+        if class_dates:
+            try:
+                pattern = extract_weekly_pattern(class_dates)
+            except Exception:  # pragma: no cover - defensive guard
+                pattern = []
+            if pattern:
+                valid_dates: List[datetime] = []
+                for iso in class_dates:
+                    try:
+                        dt_obj = datetime.fromisoformat(iso)
+                    except Exception:
+                        continue
+                    valid_dates.append(dt_obj)
+                if valid_dates:
+                    last_date = max(valid_dates)
+                    try:
+                        generated = generate_from_pattern(
+                            anchor=last_date, pattern=pattern, count=1
+                        )
+                    except Exception:
+                        logging.warning(
+                            "Failed to generate replacement class for student %s at %s",
+                            student_id,
+                            iso_dt,
+                            exc_info=True,
+                        )
+                    else:
+                        for new_dt in generated:
+                            new_iso = new_dt.isoformat()
+                            if new_iso not in class_dates:
+                                class_dates.append(new_iso)
+                                break
+        class_dates.sort()
+
+    if iso_dt not in cancelled:
+        cancelled.append(iso_dt)
+
+    stu["class_dates"] = class_dates
     stu["cancelled_dates"] = cancelled
+
     if is_late:
         stu["classes_remaining"] = max(0, stu.get("classes_remaining", 0) - 1)
+
     data[str(student_id)] = stu
     save_students(data)
-    append_log(
-        {
-            "type": "class_cancelled",
-            "student_id": student_id,
-            "at": iso_dt,
-            "date": iso_dt,
-            "status": "cancelled_late" if is_late else "cancelled_early",
-            "is_late": is_late,
-            "ts": datetime.utcnow().isoformat(),
-        }
-    )
+
+    if log:
+        append_log(
+            {
+                "type": "class_cancelled",
+                "student_id": student_id,
+                "at": iso_dt,
+                "date": iso_dt,
+                "status": "cancelled_late" if is_late else "cancelled_early",
+                "is_late": is_late,
+                "ts": datetime.utcnow().isoformat(),
+            }
+        )
+
     return True
 
 

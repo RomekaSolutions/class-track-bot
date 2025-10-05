@@ -43,18 +43,37 @@ def test_mark_class_completed(tmp_path, monkeypatch):
 
 
 def test_cancel_single_class_early(tmp_path, monkeypatch):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     d1 = (now + timedelta(hours=48)).isoformat()
     students_file, logs_file = _setup(monkeypatch, tmp_path, [d1])
     data_store.cancel_single_class("1", d1, cutoff_hours=24)
     data = json.loads(students_file.read_text())
     stu = data["1"]
-    assert d1 in stu["class_dates"]
+    assert d1 not in stu["class_dates"]
+    assert stu["class_dates"] == []
     assert d1 in stu["cancelled_dates"]
     assert stu["classes_remaining"] == 3
     logs = json.loads(logs_file.read_text())
     assert logs[-1]["type"] == "class_cancelled"
     assert logs[-1]["is_late"] is False
+
+
+def test_cancel_single_class_early_generates_replacement(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    d1 = (now + timedelta(days=3)).isoformat()
+    d2 = (now + timedelta(days=10)).isoformat()
+    students_file, _ = _setup(monkeypatch, tmp_path, [d1, d2])
+    data_store.cancel_single_class("1", d1, cutoff_hours=24)
+    data = json.loads(students_file.read_text())
+    stu = data["1"]
+    assert d1 not in stu["class_dates"]
+    assert d2 in stu["class_dates"]
+    assert len(stu["class_dates"]) == 2
+    replacement = [dt for dt in stu["class_dates"] if dt != d2][0]
+    expected = (datetime.fromisoformat(d2) + timedelta(days=7)).isoformat()
+    assert replacement == expected
+    assert d1 in stu["cancelled_dates"]
+    assert stu["classes_remaining"] == 3
 
 
 def test_cancel_single_class_late(tmp_path, monkeypatch):
