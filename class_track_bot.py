@@ -3335,10 +3335,24 @@ async def confirm_cancel_for_student(
         raise ValueError("There is no pending cancellation to confirm.")
 
     class_time_str = pending_cancel.get("class_time")
+    request_time: Optional[datetime] = None
     try:
         datetime.fromisoformat(class_time_str)
     except Exception as exc:  # pragma: no cover - malformed time
         raise ValueError("Invalid class time format; cancellation not confirmed.") from exc
+
+    requested_at_str = pending_cancel.get("requested_at")
+    if requested_at_str:
+        try:
+            request_time = datetime.fromisoformat(requested_at_str)
+        except Exception:
+            logging.warning(
+                "Unable to parse requested_at '%s' for student %s", requested_at_str, student_key
+            )
+            request_time = None
+        else:
+            if request_time.tzinfo is None:
+                request_time = request_time.replace(tzinfo=timezone.utc)
 
     premium_student = is_premium(student)
     cancel_type = pending_cancel.get("type", "late")
@@ -3350,6 +3364,7 @@ async def confirm_cancel_for_student(
         class_time_str,
         cutoff_hours,
         log=False,
+        request_time=request_time,
     )
     if not cancelled:
         raise ValueError("Class not found; cancellation not confirmed.")

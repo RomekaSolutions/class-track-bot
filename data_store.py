@@ -442,6 +442,7 @@ def cancel_single_class(
     cutoff_hours: int,
     *,
     log: bool = True,
+    request_time: Optional[datetime] = None,
 ) -> bool:
     """Cancel a single class, applying late deduction logic."""
 
@@ -475,14 +476,26 @@ def cancel_single_class(
         return False
 
     # Use timezone-aware UTC so comparisons with aware class datetimes are valid
-    now = datetime.now(timezone.utc)
+    compare_time = request_time
+    if compare_time is not None and compare_time.tzinfo is None:
+        compare_time = compare_time.replace(tzinfo=timezone.utc)
+    if compare_time is None:
+        compare_time = datetime.now(timezone.utc)
     try:
         class_time = datetime.fromisoformat(target_iso or iso_dt)
     except Exception:
         class_time = datetime.fromisoformat(iso_dt)
     if class_time.tzinfo is None:
         class_time = class_time.replace(tzinfo=timezone.utc)
-    is_late = now > class_time - timedelta(hours=cutoff_hours)
+    is_late = compare_time > class_time - timedelta(hours=cutoff_hours)
+
+    if compare_time > class_time:
+        logging.warning(
+            "Cancellation request time %s for student %s is after class time %s",
+            compare_time.isoformat(),
+            student_id,
+            class_time.isoformat(),
+        )
 
     if not is_late and target_iso is not None:
         class_dates = [d for d in class_dates if d != target_iso]
