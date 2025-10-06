@@ -1,6 +1,13 @@
+import logging
 from datetime import datetime, timedelta, time
-
 from typing import List, Tuple, Optional
+
+try:
+    from telegram.error import BadRequest
+except Exception:  # pragma: no cover - fallback when telegram is unavailable
+
+    class BadRequest(Exception):
+        """Fallback BadRequest exception for optional telegram dependency."""
 
 
 def fmt_class_label(iso_str: str) -> str:
@@ -118,3 +125,62 @@ def slots_to_text(pattern: List[Slot]) -> str:
     return ", ".join(
         f"{WEEKDAYS[w]} {h:02d}:{m:02d}" for w, h, m, _ in pattern
     )
+
+
+async def try_ack(query, *, text=None, show_alert=False) -> bool:
+    """Attempt callback acknowledgment, returning whether it succeeded."""
+
+    try:
+        await query.answer(text=text, show_alert=show_alert)
+        return True
+    except BadRequest as exc:
+        logging.info("Callback ack failed (continuing): %s", exc)
+        return False
+    except TypeError as exc:
+        logging.debug("Ack signature mismatch: %s", exc)
+        return False
+
+
+async def _answer_with_alert(query, text: str) -> None:
+    """Safely answer a callback with an alert, falling back to messaging."""
+
+    async def _fallback_send() -> None:
+        target = None
+        if hasattr(query, "edit_message_text"):
+            try:
+                await query.edit_message_text(text)
+                return
+            except Exception as exc:  # pragma: no cover - unexpected edit failure
+                logging.warning("Failed to edit callback message: %s", exc)
+                target = getattr(query, "message", None)
+        if target is None:
+            target = getattr(query, "message", None) or query
+        if hasattr(target, "reply_text"):
+            try:
+                await target.reply_text(text)
+            except BadRequest as exc:  # pragma: no cover - depends on telegram
+                logging.warning("Failed to send callback fallback message: %s", exc)
+            except Exception as exc:  # pragma: no cover - unexpected failure
+                logging.warning("Failed to reply for callback fallback: %s", exc)
+        else:  # pragma: no cover - unexpected object type
+            logging.warning("No reply_text available for callback fallback")
+
+    try:
+        await query.answer(text, show_alert=True)
+    except TypeError:
+        try:
+            await query.answer(text)
+        except TypeError:
+            try:
+                await query.answer()
+            except TypeError as exc:  # pragma: no cover - unexpected signature
+                logging.warning("Failed to answer callback (no-arg TypeError): %s", exc)
+            except BadRequest as exc:  # pragma: no cover - depends on telegram
+                logging.warning("Failed to answer callback (no-arg): %s", exc)
+                await _fallback_send()
+        except BadRequest as exc:  # pragma: no cover - depends on telegram
+            logging.warning("Failed to answer callback (text): %s", exc)
+            await _fallback_send()
+    except BadRequest as exc:  # pragma: no cover - depends on telegram
+        logging.warning("Failed to answer callback with alert: %s", exc)
+        await _fallback_send()

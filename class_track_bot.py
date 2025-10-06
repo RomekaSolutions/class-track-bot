@@ -93,6 +93,7 @@ from keyboard_builders import (
 )
 
 import data_store
+from helpers import try_ack
 
 
 # -----------------------------------------------------------------------------
@@ -1488,7 +1489,7 @@ async def add_student_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Initiate the conversation to add a new student."""
     q = update.callback_query
     if q:
-        await q.answer()
+        await try_ack(q)
     message = update.effective_message
     await message.reply_text(
         "Adding a new student. Please enter the student's name:",
@@ -1539,7 +1540,7 @@ async def add_telegram_choice(
     query = update.callback_query
     if not query:
         return ADD_TELEGRAM_CHOICE
-    await query.answer()
+    await try_ack(query)
     choice = query.data or ""
     try:
         await query.edit_message_reply_markup(reply_markup=None)
@@ -2067,7 +2068,7 @@ async def cancel_class_command(update: Update, context: ContextTypes.DEFAULT_TYP
 async def admin_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle selection of class to cancel from admin command."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     info = context.user_data.get("admin_cancel")
     if not info:
         await query.edit_message_text("No pending cancellation.")
@@ -2425,7 +2426,7 @@ async def dayview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def dayview_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle callback for a specific day's class view."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     data = query.data.split(":", 1)
     if len(data) != 2:
         await query.edit_message_text("Invalid day selection.")
@@ -2606,7 +2607,7 @@ async def confirm_pending_callback(update: Update, context: ContextTypes.DEFAULT
 async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not is_admin(q.from_user.id if q and q.from_user else None):
-        await q.answer("Admins only.", show_alert=True)
+        await try_ack(q, text="Admins only.", show_alert=True)
         return
     action = q.data.split(":", 1)[1]
 
@@ -2620,13 +2621,13 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             kb = build_students_page_kb(students, page=0)
             return await safe_edit_or_send(q, "👥 Students", reply_markup=kb)
         elif action == "logs":
-            await q.answer()
+            await try_ack(q)
             return await safe_edit_or_send(
                 q,
                 "📂 Logs / Exports\nUse /downloadmonth for now. Menu coming soon.",
             )
         elif action == "settings":
-            await q.answer()
+            await try_ack(q)
             return await safe_edit_or_send(
                 q,
                 "⚙️ Settings\nQuick toggles coming soon.",
@@ -2634,7 +2635,7 @@ async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif action == "root":
             return await admin_command(update, context)
         else:
-            await q.answer("Unknown admin action.", show_alert=False)
+            await try_ack(q, text="Unknown admin action.", show_alert=False)
             return
     except Exception:
         logging.exception("ADMIN MENU ACTION CRASH action=%s", action)
@@ -2724,9 +2725,9 @@ async def connect_student_callback(
         return
     user_id = getattr(getattr(query, "from_user", None), "id", None)
     if not is_admin(user_id):
-        await query.answer("Admins only.", show_alert=True)
+        await try_ack(query, text="Admins only.", show_alert=True)
         return
-    await query.answer()
+    await try_ack(query)
     data = query.data or ""
     parts = data.split(":", 2)
     if len(parts) < 3:
@@ -2739,7 +2740,7 @@ async def connect_student_callback(
         await safe_edit_or_send(query, "Student not found.")
         return
     if student.get("telegram_mode", True):
-        await query.answer("Already connected.", show_alert=False)
+        await try_ack(query, text="Already connected.", show_alert=False)
         text, markup = build_student_detail_view(student_key, student)
         await safe_edit_or_send(query, text, reply_markup=markup)
         return
@@ -3031,7 +3032,7 @@ async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def edit_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle selection of a student to edit."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     parts = query.data.split(":")
     if len(parts) < 3:
         await query.edit_message_text("Student not found")
@@ -3061,7 +3062,7 @@ async def edit_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def edit_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle menu actions after a student has been chosen."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     data = query.data
     action = data.split(":", 2)[2] if ":" in data else ""
     student_key = context.user_data.get("edit_student_key")
@@ -3121,7 +3122,7 @@ async def edit_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def edit_delweekly_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Remove a weekly slot from a student's schedule."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     parts = query.data.split(":")
     if len(parts) != 4:
         await query.edit_message_text("Invalid selection.")
@@ -3171,7 +3172,7 @@ async def edit_delweekly_callback(update: Update, context: ContextTypes.DEFAULT_
 async def edit_time_slot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Present scope options after picking a slot."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     parts = query.data.split(":")
     if len(parts) != 5:
         await query.edit_message_text("Invalid selection.")
@@ -3207,7 +3208,7 @@ async def edit_time_slot_callback(update: Update, context: ContextTypes.DEFAULT_
 async def edit_time_scope_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle scope selection for changing class time."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     parts = query.data.split(":")
     if len(parts) != 6:
         await query.edit_message_text("Invalid selection.")
@@ -3272,7 +3273,7 @@ async def edit_time_scope_callback(update: Update, context: ContextTypes.DEFAULT
 async def edit_time_oncepick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt for new time after picking a single occurrence."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     parts = query.data.split(":")
     if len(parts) != 4:
         await query.edit_message_text("Invalid selection.")
@@ -4228,7 +4229,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle button presses from students (inline keyboard)."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     user = query.from_user
     data = query.data
     message_id = getattr(getattr(query, "message", None), "message_id", None)
@@ -4241,7 +4242,7 @@ async def student_button_handler(update: Update, context: ContextTypes.DEFAULT_T
     )
     if DEBUG_MODE:
         try:
-            await query.answer(f"tap:{data}", show_alert=False)
+            await try_ack(query, text=f"tap:{data}", show_alert=False)
         except Exception:
             pass
     student_key = None
@@ -4562,7 +4563,7 @@ async def initiate_cancel_class(query, student: Dict[str, Any]) -> None:
 async def handle_cancel_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the student's selection of a class to cancel."""
     query = update.callback_query
-    await query.answer()
+    await try_ack(query)
     user = query.from_user
     students = load_students()
     student_key, student = resolve_student(students, str(user.id))
