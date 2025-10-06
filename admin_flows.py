@@ -22,6 +22,8 @@ from helpers import (
     generate_from_pattern,
     get_weekly_pattern_from_history,
     slots_to_text,
+    try_ack,
+    _answer_with_alert,
     Slot,
 )
 
@@ -106,47 +108,6 @@ async def safe_edit_or_send(target, text: str, reply_markup=None) -> None:
         await target.message.reply_text(text, reply_markup=reply_markup)
     else:
         await target.reply_text(text, reply_markup=reply_markup)
-
-
-async def try_ack(query, *, text=None, show_alert=False) -> bool:
-    """Attempt callback acknowledgment, return success status."""
-
-    try:
-        await query.answer(text=text, show_alert=show_alert)
-        return True
-    except BadRequest as exc:
-        logging.info("Callback ack failed (continuing): %s", exc)
-        return False
-    except TypeError as exc:
-        logging.debug("Ack signature mismatch: %s", exc)
-        return False
-
-
-async def _answer_with_alert(query, text: str) -> None:
-    """Safely answer a callback with ``show_alert`` when supported."""
-
-    async def _answer_without_alert() -> None:
-        try:
-            await query.answer(text)
-        except TypeError:
-            try:
-                await query.answer()
-            except TypeError as exc:  # pragma: no cover - unexpected signature
-                logging.warning("Failed to answer callback (no-arg TypeError): %s", exc)
-            except BadRequest as exc:  # pragma: no cover - depends on telegram
-                logging.warning("Failed to answer callback (no-arg): %s", exc)
-                await safe_edit_or_send(query, text)
-        except BadRequest as exc:  # pragma: no cover - depends on telegram
-            logging.warning("Failed to answer callback (text): %s", exc)
-            await safe_edit_or_send(query, text)
-
-    try:
-        await query.answer(text, show_alert=True)
-    except TypeError:
-        await _answer_without_alert()
-    except BadRequest as exc:  # pragma: no cover - depends on telegram
-        logging.warning("Failed to answer callback with alert: %s", exc)
-        await safe_edit_or_send(query, text)
 
 
 def _back_markup(student_id: str) -> InlineKeyboardMarkup:
@@ -793,7 +754,7 @@ async def handle_student_action(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+    await try_ack(query)
     logging.debug("handle_student_action data=%s", query.data)
     data = query.data or ""
     if not data.startswith("stu:"):
