@@ -301,17 +301,49 @@ def validate_student_record(student: Dict[str, Any]) -> Tuple[bool, str]:
     return True, ""
 
 
-def _is_cycle_finished(student: Dict[str, Any]) -> bool:
+def _count_paid_future_classes(student: Dict[str, Any]) -> int:
+    """Fallback: count future classes within paid credit window."""
     now = datetime.now(timezone.utc)
-    if student.get("classes_remaining", 0) != 0:
-        return False
+    cancelled = set(student.get("cancelled_dates", []))
+
+    future_count = 0
     for dt_str in student.get("class_dates", []):
+        if dt_str in cancelled:
+            continue
         try:
-            if datetime.fromisoformat(dt_str) > now:
-                return False
+            dt = _parse_iso(dt_str)
+            if dt > now:
+                future_count += 1
         except Exception:
             continue
-    return True
+
+    # Cap to paid credits for non-premium
+    if student.get("premium"):
+        return future_count
+
+    remaining = max(0, student.get("classes_remaining", 0))
+    return min(future_count, remaining)
+
+
+def _is_cycle_finished(student: Dict[str, Any]) -> bool:
+    # Check paid classes remaining
+    if student.get("classes_remaining", 0) != 0:
+        return False
+
+    # Check free credits - block renewal until used
+    if student.get("free_class_credit", 0) > 0:
+        return False
+
+    # Try to use bot helper, fall back to local implementation
+    try:
+        from class_track_bot import get_student_visible_classes
+
+        # Pass count=1 to check if ANY paid classes exist
+        upcoming_paid = get_student_visible_classes(student, count=1)
+        return len(upcoming_paid) == 0
+    except ImportError:
+        # Fallback when circular import prevents bot helper access
+        return _count_paid_future_classes(student) == 0
 
 
 def _last_renewal_qty(student_id: str) -> int:
