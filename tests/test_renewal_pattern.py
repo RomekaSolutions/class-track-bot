@@ -83,6 +83,59 @@ def test_weekly_pattern_reuse(monkeypatch):
     assert stu["cancelled_dates"] == []
 
 
+def test_cycle_finished_allows_renewal_when_paid_zero(monkeypatch):
+    monday = datetime(2025, 1, 6, 18, 0, tzinfo=timezone.utc)
+    thursday = datetime(2025, 1, 9, 17, 0, tzinfo=timezone.utc)
+    logs = _make_history_logs(monday, thursday)
+    monkeypatch.setattr(af.data_store, "load_logs", lambda: logs)
+
+    future_base = datetime.now(timezone.utc)
+    future_dates = [
+        (future_base + timedelta(days=7)).isoformat(),
+        (future_base + timedelta(days=14)).isoformat(),
+    ]
+    student = {
+        "name": "A",
+        "classes_remaining": 0,
+        "free_class_credit": 0,
+        "class_dates": future_dates,
+        "cancelled_dates": [],
+    }
+    assert af._is_cycle_finished(student)
+
+    monkeypatch.setattr(af.data_store, "get_student_by_id", lambda sid: student)
+    students = {"1": student.copy()}
+    monkeypatch.setattr(af.data_store, "load_students", lambda: students)
+    saved = {}
+    monkeypatch.setattr(af.data_store, "save_students", lambda s: saved.update(s))
+    monkeypatch.setattr(af.data_store, "append_log", lambda e: None)
+    monkeypatch.setattr(
+        af.keyboard_builders,
+        "build_student_detail_view",
+        lambda sid, stu: ("ok", None),
+    )
+
+    class DummyQuery:
+        def __init__(self, data):
+            self.data = data
+            self.edited = None
+
+        async def answer(self):
+            pass
+
+        async def edit_message_text(self, text, reply_markup=None):
+            self.edited = text
+
+    query = DummyQuery("cfm:RENEW:1:6")
+    update = types.SimpleNamespace(callback_query=query)
+    asyncio.run(af.renew_confirm(update, types.SimpleNamespace()))
+
+    assert "Renewed 6" in query.edited
+    stu = saved["1"]
+    assert stu["classes_remaining"] == 6
+    assert len(stu["class_dates"]) == 6
+
+
 def test_no_pattern_fallback(monkeypatch):
     base = datetime(2025, 1, 6, 18, 0, tzinfo=timezone.utc)
     logs = [
