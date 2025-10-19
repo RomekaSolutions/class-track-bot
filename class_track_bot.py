@@ -5363,12 +5363,8 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # Ensure schedules extend into the future and reminders are set
     students = load_students()
-    changed = False
     for key, student in students.items():
-        changed |= ensure_future_class_dates(student)
         schedule_student_reminders(application, key, student)
-    if changed:
-        save_students(students)
     # Job queue for balance warnings and monthly export
     # Low class warnings at 10:00 every day (timezone-aware)
     application.job_queue.run_daily(low_class_warning_job, time=time(hour=10, minute=0, tzinfo=tz))
