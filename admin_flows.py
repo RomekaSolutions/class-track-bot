@@ -349,7 +349,9 @@ def _is_cycle_finished(student: Dict[str, Any]) -> bool:
 def _last_renewal_qty(student_id: str) -> int:
     logs = data_store.load_logs()
     for event in reversed(logs):
-        if str(event.get("student_id")) == str(student_id) and event.get("type") == "renewal":
+        event_student = event.get("student") or event.get("student_id")
+        # If event_student is None, comparison fails safely (no match)
+        if str(event_student) == str(student_id) and event.get("type") == "renewal":
             try:
                 qty = int(event.get("qty", 0))
             except Exception:
@@ -410,7 +412,9 @@ def _history_and_pattern(
     logs = data_store.load_logs()
     history: List[datetime] = []
     for event in logs:
-        if str(event.get("student_id")) != str(student_id):
+        event_student = event.get("student") or event.get("student_id")
+        # If event_student is None, comparison fails safely (no match)
+        if str(event_student) != str(student_id):
             continue
         dt_str = None
         if event.get("type") == "class_completed":
