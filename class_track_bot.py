@@ -3387,7 +3387,17 @@ async def confirm_cancel_for_student(
         raise ValueError("Student record missing after cancellation.")
 
     student.pop("pending_cancel", None)
-    ensure_future_class_dates(student)
+    # Only extend for premium or early cancellations
+    # Late cancellations should not regenerate dates
+    should_extend = False
+
+    if is_premium(student):
+        should_extend = True
+    elif cancel_type == "early":
+        should_extend = True
+
+    if should_extend:
+        ensure_future_class_dates(student)
 
     if premium_student:
         response = (
