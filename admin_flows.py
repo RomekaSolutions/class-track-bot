@@ -654,11 +654,11 @@ async def renew_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
     else:
         # In test contexts, ContextTypes.DEFAULT_TYPE may be a dummy without .application
-        if not hasattr(context, "application"):
-            return
-        schedule_student_reminders(context.application, student_id, stu)
-        await send_low_balance_if_threshold(context.application, student_id, stu)
-        schedule_final_set_notice(context.application, student_id, stu)
+        application = getattr(context, "application", None)
+        if application:
+            schedule_student_reminders(application, student_id, stu)
+            await send_low_balance_if_threshold(application, student_id, stu)
+            schedule_final_set_notice(application, student_id, stu)
 
     text, markup = keyboard_builders.build_student_detail_view(student_id, stu)
     msg = (

@@ -4008,6 +4008,7 @@ def build_admin_menu_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⚙️ Settings", callback_data="admin:settings"),
         ],
     ]
+    rows.append([InlineKeyboardButton("📩 Read Asks", callback_data="admin:asks")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -4084,6 +4085,19 @@ def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMar
         [InlineKeyboardButton("❌ Cancel Class", callback_data="cancel_class")],
         [InlineKeyboardButton("🔔 Notification Settings", callback_data="notification_settings")],
     ]
+    student_id = student.get("telegram_id")
+    try:
+        ask_target = int(student_id) if student_id is not None else None
+    except (TypeError, ValueError):
+        ask_target = None
+    if ask_target is not None:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    "❓ Ask Tutor", callback_data=f"ask:start:{ask_target}"
+                )
+            ]
+        )
     if student.get("free_class_credit", 0) > 0:
         buttons.append([InlineKeyboardButton("🎁 Free Class Credit", callback_data="free_credit")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
@@ -5280,6 +5294,10 @@ def main() -> None:
         allow_reentry=True,
     )
     application.add_handler(conv_handler)
+
+    import ask_tutor
+
+    ask_tutor.register_handlers(application, admin_ids=ADMIN_IDS)
     # Admin commands
     application.add_handler(CommandHandler("logclass", log_class_command))
     application.add_handler(CommandHandler("cancelclass", cancel_class_command))
