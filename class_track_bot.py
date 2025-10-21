@@ -4094,7 +4094,7 @@ def build_start_message(student: Dict[str, Any]) -> Tuple[str, InlineKeyboardMar
         buttons.append(
             [
                 InlineKeyboardButton(
-                    "❓ Ask Tutor", callback_data=f"ask:start:{ask_target}"
+                    "📥 Gregor's Tray", callback_data=f"ask:start:{ask_target}"
                 )
             ]
         )

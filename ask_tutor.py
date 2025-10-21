@@ -226,8 +226,8 @@ async def start_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     session = _prepare_session(student_id, chat_id)
     _store_session(context, session)
     message = (
-        "📝 Ask your question (text/image/voice). "
-        "Type /done when finished."
+        "📝 Leave a message in Gregor's tray (text/image/voice). "
+        "He'll check it before your next class. Type /done when finished."
     )
     await safe_edit_or_send(query, message)
     return AskStates.COLLECTING
